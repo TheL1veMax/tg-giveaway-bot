@@ -333,7 +333,6 @@ class Database:
             ''', (giveaway_id, user_id, datetime.now().isoformat(), referred_by))
             self.conn.commit()
 
-            # Если есть реферер, добавляем запись и бонусы
             if referred_by:
                 try:
                     cursor.execute('''
@@ -341,7 +340,6 @@ class Database:
                         VALUES (?, ?, ?, ?)
                     ''', (referred_by, user_id, giveaway_id, datetime.now().isoformat()))
 
-                    # Добавляем бонусную заявку рефереру
                     cursor.execute('''
                         UPDATE participants 
                         SET bonus_entries = bonus_entries + 1
@@ -350,7 +348,7 @@ class Database:
 
                     self.conn.commit()
                 except sqlite3.IntegrityError:
-                    pass  # Реферал уже был добавлен
+                    pass
 
             return True
         except sqlite3.IntegrityError:
@@ -362,7 +360,6 @@ class Database:
             return True
 
     def get_referral_count(self, user_id, giveaway_id):
-        """Получить количество приглашенных пользователей"""
         cursor = self.conn.cursor()
         cursor.execute('''
             SELECT COUNT(*) FROM referrals 
@@ -371,7 +368,6 @@ class Database:
         return cursor.fetchone()[0]
 
     def get_referrals_list(self, user_id, giveaway_id):
-        """Получить список приглашенных пользователей"""
         cursor = self.conn.cursor()
         cursor.execute('''
             SELECT r.referred_id, u.username, u.first_name, r.referral_date
@@ -383,7 +379,6 @@ class Database:
         return cursor.fetchall()
 
     def get_referrer(self, user_id, giveaway_id):
-        """Узнать кто пригласил пользователя"""
         cursor = self.conn.cursor()
         cursor.execute('''
             SELECT p.referred_by, u.username, u.first_name
@@ -394,7 +389,6 @@ class Database:
         return cursor.fetchone()
 
     def get_bonus_entries(self, user_id, giveaway_id):
-        """Получить количество бонусных заявок"""
         cursor = self.conn.cursor()
         cursor.execute('''
             SELECT bonus_entries FROM participants 
@@ -404,7 +398,6 @@ class Database:
         return result[0] if result else 0
 
     def get_participants_with_bonus(self, giveaway_id):
-        """Получить всех участников с учетом бонусных заявок для розыгрыша"""
         cursor = self.conn.cursor()
         cursor.execute('''
             SELECT user_id, (1 + bonus_entries) as total_entries
@@ -700,7 +693,6 @@ def my_referrals(update: Update, context: CallbackContext):
         referral_count = db.get_referral_count(user_id, gid)
         bonus_entries = db.get_bonus_entries(user_id, gid)
 
-        # Генерируем реферальную ссылку
         bot_username = context.bot.get_me().username
         ref_link = f"https://t.me/{bot_username}?start=ref_{gid}_{user_id}"
 
