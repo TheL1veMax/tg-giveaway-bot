@@ -1,1 +1,0 @@
-worker: python GSMgiveaway_bot.py
