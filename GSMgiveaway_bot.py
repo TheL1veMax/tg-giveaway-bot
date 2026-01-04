@@ -11,16 +11,13 @@ import hashlib
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, CallbackContext, Filters
 
-# Настройки
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8458068573:AAHaKHcWQZOOmTu-z2wu-7kbX8MdhonkS_M')
 ADMIN_IDS = [5207853162, 5406117718]
 CHANNEL_ID = "@sportgagarinmolodezh"
 
-# Логирование
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# База данных
 class Database:
     def __init__(self, db_name='giveaway.db'):
         self.conn = sqlite3.connect(db_name, check_same_thread=False)
@@ -28,92 +25,39 @@ class Database:
         self.create_tables()
 
     def create_tables(self):
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_name TEXT,
-                joined_date TEXT NOT NULL,
-                is_verified INTEGER DEFAULT 0,
-                verification_date TEXT,
-                verification_method TEXT,
-                is_banned INTEGER DEFAULT 0,
-                ban_reason TEXT,
-                banned_date TEXT,
-                ip_hash TEXT,
-                last_activity TEXT,
-                verification_attempts INTEGER DEFAULT 0
-            )
-        """)
+        self.cursor.execute("""CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT,
+            joined_date TEXT NOT NULL, is_verified INTEGER DEFAULT 0, verification_date TEXT,
+            verification_method TEXT, is_banned INTEGER DEFAULT 0, ban_reason TEXT,
+            banned_date TEXT, ip_hash TEXT, last_activity TEXT, verification_attempts INTEGER DEFAULT 0)""")
 
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS verification_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                verification_type TEXT NOT NULL,
-                success INTEGER NOT NULL,
-                attempt_date TEXT NOT NULL,
-                ip_hash TEXT
-            )
-        """)
+        self.cursor.execute("""CREATE TABLE IF NOT EXISTS verification_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            verification_type TEXT NOT NULL, success INTEGER NOT NULL,
+            attempt_date TEXT NOT NULL, ip_hash TEXT)""")
 
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS ban_list (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                admin_id INTEGER,
-                reason TEXT,
-                ban_date TEXT NOT NULL,
-                unban_date TEXT
-            )
-        """)
+        self.cursor.execute("""CREATE TABLE IF NOT EXISTS ban_list (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            admin_id INTEGER, reason TEXT, ban_date TEXT NOT NULL, unban_date TEXT)""")
 
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS ip_addresses (
-                ip_hash TEXT PRIMARY KEY,
-                user_count INTEGER DEFAULT 1,
-                first_seen TEXT NOT NULL,
-                last_seen TEXT NOT NULL
-            )
-        """)
+        self.cursor.execute("""CREATE TABLE IF NOT EXISTS ip_addresses (
+            ip_hash TEXT PRIMARY KEY, user_count INTEGER DEFAULT 1,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL)""")
 
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS giveaways (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                description TEXT,
-                winner_count INTEGER DEFAULT 1,
-                start_date TEXT NOT NULL,
-                end_date TEXT NOT NULL,
-                is_active INTEGER DEFAULT 1,
-                message_id INTEGER,
-                channel_id TEXT
-            )
-        """)
+        self.cursor.execute("""CREATE TABLE IF NOT EXISTS giveaways (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT,
+            winner_count INTEGER DEFAULT 1, start_date TEXT NOT NULL, end_date TEXT NOT NULL,
+            is_active INTEGER DEFAULT 1, message_id INTEGER, channel_id TEXT)""")
 
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS participants (
-                giveaway_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                join_date TEXT NOT NULL,
-                is_valid INTEGER DEFAULT 1,
-                referred_by INTEGER,
-                bonus_entries INTEGER DEFAULT 0,
-                PRIMARY KEY (giveaway_id, user_id)
-            )
-        """)
+        self.cursor.execute("""CREATE TABLE IF NOT EXISTS participants (
+            giveaway_id INTEGER NOT NULL, user_id INTEGER NOT NULL, join_date TEXT NOT NULL,
+            is_valid INTEGER DEFAULT 1, referred_by INTEGER, bonus_entries INTEGER DEFAULT 0,
+            PRIMARY KEY (giveaway_id, user_id))""")
 
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS referrals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                referrer_id INTEGER NOT NULL,
-                referred_id INTEGER NOT NULL,
-                giveaway_id INTEGER NOT NULL,
-                referral_date TEXT NOT NULL,
-                UNIQUE(referrer_id, referred_id, giveaway_id)
-            )
-        """)
+        self.cursor.execute("""CREATE TABLE IF NOT EXISTS referrals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, referrer_id INTEGER NOT NULL,
+            referred_id INTEGER NOT NULL, giveaway_id INTEGER NOT NULL,
+            referral_date TEXT NOT NULL, UNIQUE(referrer_id, referred_id, giveaway_id))""")
 
         self.conn.commit()
 
@@ -122,14 +66,12 @@ class Database:
             self.cursor.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
             exists = self.cursor.fetchone()
             current_time = datetime.now().isoformat()
-
             if exists:
-                self.cursor.execute("""UPDATE users SET username = ?, first_name = ?, last_name = ?, last_activity = ? WHERE user_id = ?""",
+                self.cursor.execute("UPDATE users SET username = ?, first_name = ?, last_name = ?, last_activity = ? WHERE user_id = ?",
                     (username, first_name, last_name, current_time, user_id))
             else:
-                self.cursor.execute("""INSERT INTO users (user_id, username, first_name, last_name, joined_date, last_activity, is_verified)
-                    VALUES (?, ?, ?, ?, ?, ?, 0)""", (user_id, username, first_name, last_name, current_time, current_time))
-
+                self.cursor.execute("INSERT INTO users (user_id, username, first_name, last_name, joined_date, last_activity, is_verified) VALUES (?, ?, ?, ?, ?, ?, 0)",
+                    (user_id, username, first_name, last_name, current_time, current_time))
             self.conn.commit()
             return True
         except:
@@ -138,12 +80,11 @@ class Database:
     def verify_user(self, user_id, method="captcha", ip_hash=None):
         try:
             current_time = datetime.now().isoformat()
-            self.cursor.execute("""UPDATE users SET is_verified = 1, verification_date = ?, verification_method = ?, 
-                verification_attempts = verification_attempts + 1 WHERE user_id = ?""", (current_time, method, user_id))
-            self.cursor.execute("""INSERT INTO verification_history (user_id, verification_type, success, attempt_date, ip_hash)
-                VALUES (?, ?, 1, ?, ?)""", (user_id, method, current_time, ip_hash))
+            self.cursor.execute("UPDATE users SET is_verified = 1, verification_date = ?, verification_method = ?, verification_attempts = verification_attempts + 1 WHERE user_id = ?",
+                (current_time, method, user_id))
+            self.cursor.execute("INSERT INTO verification_history (user_id, verification_type, success, attempt_date, ip_hash) VALUES (?, ?, 1, ?, ?)",
+                (user_id, method, current_time, ip_hash))
             self.conn.commit()
-
             self.cursor.execute('SELECT is_verified FROM users WHERE user_id = ?', (user_id,))
             result = self.cursor.fetchone()
             return result and result[0] == 1
@@ -163,8 +104,8 @@ class Database:
         try:
             current_time = datetime.now().isoformat()
             self.cursor.execute('UPDATE users SET verification_attempts = verification_attempts + 1 WHERE user_id = ?', (user_id,))
-            self.cursor.execute("""INSERT INTO verification_history (user_id, verification_type, success, attempt_date, ip_hash)
-                VALUES (?, ?, ?, ?, ?)""", (user_id, method, 1 if success else 0, current_time, ip_hash))
+            self.cursor.execute("INSERT INTO verification_history (user_id, verification_type, success, attempt_date, ip_hash) VALUES (?, ?, ?, ?, ?)",
+                (user_id, method, 1 if success else 0, current_time, ip_hash))
             self.conn.commit()
             return True
         except:
@@ -179,8 +120,8 @@ class Database:
 
     def get_verification_history(self, user_id, limit=10):
         try:
-            self.cursor.execute("""SELECT verification_type, success, attempt_date, ip_hash FROM verification_history
-                WHERE user_id = ? ORDER BY attempt_date DESC LIMIT ?""", (user_id, limit))
+            self.cursor.execute("SELECT verification_type, success, attempt_date, ip_hash FROM verification_history WHERE user_id = ? ORDER BY attempt_date DESC LIMIT ?",
+                (user_id, limit))
             return self.cursor.fetchall()
         except:
             return []
@@ -196,8 +137,8 @@ class Database:
         try:
             current_time = datetime.now()
             unban_date = current_time + timedelta(days=days)
-            self.cursor.execute("""INSERT INTO ban_list (user_id, admin_id, reason, ban_date, unban_date)
-                VALUES (?, ?, ?, ?, ?)""", (user_id, admin_id, reason, current_time.isoformat(), unban_date.isoformat()))
+            self.cursor.execute("INSERT INTO ban_list (user_id, admin_id, reason, ban_date, unban_date) VALUES (?, ?, ?, ?, ?)",
+                (user_id, admin_id, reason, current_time.isoformat(), unban_date.isoformat()))
             self.cursor.execute('UPDATE users SET is_banned = 1, ban_reason = ?, banned_date = ? WHERE user_id = ?',
                 (reason, current_time.isoformat(), user_id))
             self.cursor.execute('UPDATE participants SET is_valid = 0 WHERE user_id = ?', (user_id,))
@@ -243,13 +184,10 @@ class Database:
             self.cursor.execute('UPDATE users SET ip_hash = ? WHERE user_id = ?', (ip_hash, user_id))
             self.cursor.execute('SELECT user_count FROM ip_addresses WHERE ip_hash = ?', (ip_hash,))
             exists = self.cursor.fetchone()
-
             if exists:
                 self.cursor.execute('UPDATE ip_addresses SET user_count = user_count + 1, last_seen = ? WHERE ip_hash = ?', (current_time, ip_hash))
             else:
-                self.cursor.execute('INSERT INTO ip_addresses (ip_hash, user_count, first_seen, last_seen) VALUES (?, 1, ?, ?)',
-                    (ip_hash, current_time, current_time))
-
+                self.cursor.execute('INSERT INTO ip_addresses (ip_hash, user_count, first_seen, last_seen) VALUES (?, 1, ?, ?)', (ip_hash, current_time, current_time))
             self.conn.commit()
             return ip_hash
         except:
@@ -280,8 +218,8 @@ class Database:
         try:
             start_date = datetime.now()
             end_date = start_date + timedelta(hours=hours)
-            self.cursor.execute("""INSERT INTO giveaways (name, description, winner_count, start_date, end_date, is_active, channel_id)
-                VALUES (?, ?, ?, ?, ?, 1, ?)""", (name, description, winners, start_date.isoformat(), end_date.isoformat(), channel_id))
+            self.cursor.execute("INSERT INTO giveaways (name, description, winner_count, start_date, end_date, is_active, channel_id) VALUES (?, ?, ?, ?, ?, 1, ?)",
+                (name, description, winners, start_date.isoformat(), end_date.isoformat(), channel_id))
             self.conn.commit()
             return self.cursor.lastrowid
         except:
@@ -299,7 +237,6 @@ class Database:
             current_time = datetime.now().isoformat()
             self.cursor.execute('INSERT INTO participants (giveaway_id, user_id, join_date, referred_by) VALUES (?, ?, ?, ?)',
                 (giveaway_id, user_id, current_time, referred_by))
-
             if referred_by:
                 try:
                     self.cursor.execute('INSERT INTO referrals (referrer_id, referred_id, giveaway_id, referral_date) VALUES (?, ?, ?, ?)',
@@ -308,7 +245,6 @@ class Database:
                         (giveaway_id, referred_by))
                 except:
                     pass
-
             self.conn.commit()
             return True
         except:
@@ -363,8 +299,8 @@ class Database:
 
     def get_participants_with_info(self, giveaway_id):
         try:
-            self.cursor.execute("""SELECT p.user_id, u.username, u.first_name, u.is_banned, p.join_date FROM participants p
-                LEFT JOIN users u ON p.user_id = u.user_id WHERE p.giveaway_id = ? AND p.is_valid = 1 ORDER BY p.join_date""", (giveaway_id,))
+            self.cursor.execute("SELECT p.user_id, u.username, u.first_name, u.is_banned, p.join_date FROM participants p LEFT JOIN users u ON p.user_id = u.user_id WHERE p.giveaway_id = ? AND p.is_valid = 1 ORDER BY p.join_date",
+                (giveaway_id,))
             return self.cursor.fetchall()
         except:
             return []
@@ -384,7 +320,6 @@ class Database:
         except:
             return False
 
-# Инициализация
 db = Database()
 captcha_storage = {}
 
@@ -393,42 +328,36 @@ def generate_captcha():
     b = random.randint(1, 10)
     operations = ['+', '-', '*']
     operation = random.choice(operations)
-
     if operation == '+':
         answer = a + b
-        question = "{} + {}".format(a, b)
+        question = str(a) + " + " + str(b)
     elif operation == '-':
         answer = a - b
-        question = "{} - {}".format(a, b)
+        question = str(a) + " - " + str(b)
     else:
         answer = a * b
-        question = "{} x {}".format(a, b)
-
+        question = str(a) + " x " + str(b)
     return question, str(answer)
 
 def extract_ip_from_request(update):
     user = update.effective_user
-    return "{}.{}.{}".format(user.id, hash(str(user.id)) % 255, hash(user.username or '') % 255)
+    return str(user.id) + "." + str(hash(str(user.id)) % 255) + "." + str(hash(user.username or '') % 255)
 
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
-# Команды пользователей
 def start(update, context):
     user = update.effective_user
     db.add_user(user.id, user.username or "", user.first_name, user.last_name or "")
     db.update_user_activity(user.id)
-
     try:
         ip = extract_ip_from_request(update)
         db.add_ip_address(user.id, ip)
     except:
         pass
-
     if db.is_banned(user.id):
         update.message.reply_text("Вы забанены")
         return
-
     if context.args and context.args[0].startswith('ref_'):
         try:
             parts = context.args[0].split('_')
@@ -441,430 +370,267 @@ def start(update, context):
                 return
         except:
             pass
-
-    text = "Привет, {}!
-
-Бот для розыгрышей
-
-/verify - Пройти проверку
-/my_referrals - Мои рефералы
-/help - Помощь".format(user.first_name)
+    text = "Привет, " + user.first_name + "!\n\nБот для розыгрышей\n\n/verify - Пройти проверку\n/my_referrals - Мои рефералы\n/help - Помощь"
     update.message.reply_text(text)
 
 def verify(update, context):
     if update.message.chat.type != 'private':
         update.message.reply_text("Только в личных сообщениях!")
         return
-
     user_id = update.effective_user.id
-
     if db.is_banned(user_id):
         update.message.reply_text("Вы забанены")
         return
-
     if db.is_verified(user_id):
         update.message.reply_text("Вы уже верифицированы!")
         return
-
     question, answer = generate_captcha()
     ip = extract_ip_from_request(update)
     ip_hash = hashlib.sha256(ip.encode()).hexdigest()[:32]
-
-    captcha_storage[user_id] = {
-        'answer': answer,
-        'attempts': 0,
-        'time': datetime.now(),
-        'ip_hash': ip_hash
-    }
-
-    update.message.reply_text("Пройдите проверку
-
-Решите: {} = ?
-
-Отправьте ответ числом.".format(question))
+    captcha_storage[user_id] = {'answer': answer, 'attempts': 0, 'time': datetime.now(), 'ip_hash': ip_hash}
+    update.message.reply_text("Пройдите проверку\n\nРешите: " + question + " = ?\n\nОтправьте ответ числом.")
 
 def handle_text(update, context):
     if update.message.chat.type != 'private':
         return
-
     user_id = update.effective_user.id
     text = update.message.text.strip()
-
     if db.is_banned(user_id):
         return
-
     if user_id in captcha_storage:
         captcha = captcha_storage[user_id]
-
         if datetime.now() - captcha['time'] > timedelta(minutes=5):
             update.message.reply_text("Время вышло. /verify")
             db.record_verification_attempt(user_id, success=False, ip_hash=captcha.get('ip_hash'))
             del captcha_storage[user_id]
             return
-
         if text == captcha['answer']:
             ip_hash = captcha.get('ip_hash')
             success = db.verify_user(user_id, method="captcha", ip_hash=ip_hash)
-
             if success:
                 del captcha_storage[user_id]
                 multi_accounts = db.check_multiple_accounts(user_id)
                 if multi_accounts:
                     update.message.reply_text("Обнаружены мультиаккаунты.")
-                update.message.reply_text("Проверка пройдена!
-
-Теперь можете участвовать!")
+                update.message.reply_text("Проверка пройдена!\n\nТеперь можете участвовать!")
             else:
                 update.message.reply_text("Ошибка! Попробуйте /verify")
         else:
             captcha['attempts'] += 1
             db.record_verification_attempt(user_id, success=False, ip_hash=captcha.get('ip_hash'))
-
             if captcha['attempts'] >= 3:
                 update.message.reply_text("Попытки закончились. /verify")
                 del captcha_storage[user_id]
             else:
                 left = 3 - captcha['attempts']
-                update.message.reply_text("Неверно. Осталось: {}".format(left))
+                update.message.reply_text("Неверно. Осталось: " + str(left))
 
 def my_referrals(update, context):
     user_id = update.effective_user.id
-
     if db.is_banned(user_id):
         update.message.reply_text("Вы забанены")
         return
-
     if not db.is_verified(user_id):
         update.message.reply_text("Сначала пройдите проверку: /verify")
         return
-
     active_giveaways = db.get_active_giveaways()
-
     if not active_giveaways:
         update.message.reply_text("Нет активных розыгрышей")
         return
-
-    text = "Ваши реферальные ссылки:
-
-"
-
+    text = "Ваши реферальные ссылки:\n\n"
     for g in active_giveaways:
         gid, name, winners, end_date = g
         referral_count = db.get_referral_count(user_id, gid)
         bonus_entries = db.get_bonus_entries(user_id, gid)
-
         bot_username = context.bot.get_me().username
-        ref_link = "https://t.me/{}?start=ref_{}_{}".format(bot_username, gid, user_id)
-
-        text += "{}
-{}
-Приглашено: {}
-Бонусных билетов: {}
-------
-".format(name, ref_link, referral_count, bonus_entries)
-
-    text += "
-Отправьте ссылку друзьям!"
+        ref_link = "https://t.me/" + bot_username + "?start=ref_" + str(gid) + "_" + str(user_id)
+        text += name + "\n" + ref_link + "\nПриглашено: " + str(referral_count) + "\nБонусов: " + str(bonus_entries) + "\n------\n"
+    text += "\nОтправьте ссылку друзьям!"
     update.message.reply_text(text)
 
 def help_cmd(update, context):
     user_id = update.effective_user.id
-
-    text = "Помощь
-
-Команды пользователя:
-/start - Начать
-/verify - Проверка
-/my_referrals - Рефералы
-/help - Помощь
-"
-
+    text = "Помощь\n\nПользователь:\n/start - Начать\n/verify - Проверка\n/my_referrals - Рефералы\n/help - Помощь\n"
     if is_admin(user_id):
-        text += "
-Команды админа:
-/new - Создать
-/list - Список
-/end - Завершить
-/stats - Статистика
-/participants - Участники
-/remove - Удалить
-/ban - Забанить
-/unban - Разбанить
-/banned - Забаненные
-/check_multi - Мультиаккаунты
-/verify_info - Инфо о верификации
-"
-
+        text += "\nАдмин:\n/new - Создать\n/list - Список\n/end - Завершить\n/stats - Статистика\n/participants - Участники\n/remove - Удалить\n/ban - Забанить\n/unban - Разбанить\n/banned - Забаненные\n/check_multi - Мультиаккаунты\n/verify_info - Инфо\n"
     update.message.reply_text(text)
 
-# Админ-команды
 def new_giveaway(update, context):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("Нет прав")
         return
-
     if len(context.args) < 2:
         update.message.reply_text("Использование: /new <название> <победителей> [часы] [описание]")
         return
-
     name = context.args[0]
     winners = int(context.args[1])
     hours = int(context.args[2]) if len(context.args) > 2 and context.args[2].isdigit() else 24
     description = ' '.join(context.args[3:]) if len(context.args) > 3 else "Розыгрыш"
-
     giveaway_id = db.create_giveaway(name, description, winners, hours, CHANNEL_ID)
-
     if not giveaway_id:
         update.message.reply_text("Ошибка создания")
         return
-
     end_time = datetime.now() + timedelta(hours=hours)
-
-    keyboard = [[InlineKeyboardButton("Участвовать", callback_data="join_{}".format(giveaway_id))]]
+    keyboard = [[InlineKeyboardButton("Участвовать", callback_data="join_" + str(giveaway_id))]]
     markup = InlineKeyboardMarkup(keyboard)
-
     try:
-        message = context.bot.send_message(
-            chat_id=CHANNEL_ID,
-            text="НОВЫЙ РОЗЫГРЫШ!
-
-{}
-{}
-
-Победителей: {}
-Завершится: {}
-
-Нажмите кнопку!".format(
-                name, description, winners, end_time.strftime('%d.%m.%Y в %H:%M')),
-            reply_markup=markup
-        )
-
+        message = context.bot.send_message(chat_id=CHANNEL_ID, text="НОВЫЙ РОЗЫГРЫШ!\n\n" + name + "\n" + description + "\n\nПобедителей: " + str(winners) + "\nЗавершится: " + end_time.strftime('%d.%m.%Y в %H:%M') + "\n\nНажмите кнопку!", reply_markup=markup)
         db.update_message_id(giveaway_id, message.message_id)
-        update.message.reply_text("Розыгрыш создан! ID: {}".format(giveaway_id))
+        update.message.reply_text("Розыгрыш создан! ID: " + str(giveaway_id))
     except Exception as e:
-        update.message.reply_text("Ошибка: {}".format(str(e)))
+        update.message.reply_text("Ошибка: " + str(e))
 
 def list_giveaways(update, context):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("Нет прав")
         return
-
     giveaways = db.get_active_giveaways()
-
     if not giveaways:
         update.message.reply_text("Нет розыгрышей")
         return
-
-    text = "Активные розыгрыши:
-
-"
+    text = "Активные розыгрыши:\n\n"
     for g in giveaways:
         gid, name, winners, end_date = g
         participants = db.get_participants_count(gid)
-        text += "ID: {}
-{}
-Участников: {}
-------
-".format(gid, name, participants)
-
+        text += "ID: " + str(gid) + "\n" + name + "\nУчастников: " + str(participants) + "\n------\n"
     update.message.reply_text(text)
 
 def end_giveaway(update, context):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("Нет прав")
         return
-
     if not context.args:
         update.message.reply_text("Использование: /end <id>")
         return
-
     try:
         giveaway_id = int(context.args[0])
         participants = db.get_participants(giveaway_id)
-
         if not participants:
             update.message.reply_text("Нет участников")
             return
-
         giveaway_info = db.get_giveaway_info(giveaway_id)
         if not giveaway_info:
             update.message.reply_text("Не найден")
             return
-
         winner_count = min(giveaway_info[3], len(participants))
         winners = random.sample(participants, winner_count)
-
-        winners_text = "ПОБЕДИТЕЛИ!
-
-"
+        winners_text = "ПОБЕДИТЕЛИ!\n\n"
         for i, winner_id in enumerate(winners, 1):
             try:
                 user = context.bot.get_chat(winner_id)
-                username = "@{}".format(user.username) if user.username else user.first_name
-                winners_text += "{}. {}
-".format(i, username)
+                username = "@" + user.username if user.username else user.first_name
+                winners_text += str(i) + ". " + username + "\n"
             except:
-                winners_text += "{}. ID: {}
-".format(i, winner_id)
-
+                winners_text += str(i) + ". ID: " + str(winner_id) + "\n"
         db.end_giveaway(giveaway_id)
-
         try:
             context.bot.send_message(chat_id=CHANNEL_ID, text=winners_text)
         except:
             pass
-
-        update.message.reply_text("Завершен!
-
-{}".format(winners_text))
+        update.message.reply_text("Завершен!\n\n" + winners_text)
     except Exception as e:
-        update.message.reply_text("Ошибка: {}".format(str(e)))
+        update.message.reply_text("Ошибка: " + str(e))
 
 def stats(update, context):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("Нет прав")
         return
-
     if not context.args:
         update.message.reply_text("Использование: /stats <id>")
         return
-
     try:
         giveaway_id = int(context.args[0])
         giveaway_info = db.get_giveaway_info(giveaway_id)
-
         if not giveaway_info:
             update.message.reply_text("Не найден")
             return
-
         participants_count = db.get_participants_count(giveaway_id)
         _, name, description, winners, start_date, end_date, is_active, _, _ = giveaway_info
-
         start = datetime.fromisoformat(start_date)
         end = datetime.fromisoformat(end_date)
         status = "Активен" if is_active == 1 else "Завершен"
-
-        text = "Статистика #{}
-
-{}
-{}
-Победителей: {}
-Участников: {}
-Статус: {}
-
-{} - {}".format(
-            giveaway_id, name, description, winners, participants_count, status,
-            start.strftime('%d.%m %H:%M'), end.strftime('%d.%m %H:%M'))
-
+        text = "Статистика #" + str(giveaway_id) + "\n\n" + name + "\n" + description + "\nПобедителей: " + str(winners) + "\nУчастников: " + str(participants_count) + "\nСтатус: " + status + "\n\n" + start.strftime('%d.%m %H:%M') + " - " + end.strftime('%d.%m %H:%M')
         update.message.reply_text(text)
     except Exception as e:
-        update.message.reply_text("Ошибка: {}".format(str(e)))
+        update.message.reply_text("Ошибка: " + str(e))
 
 def participants_cmd(update, context):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("Нет прав")
         return
-
     if not context.args:
         update.message.reply_text("Использование: /participants <id>")
         return
-
     try:
         giveaway_id = int(context.args[0])
         participants = db.get_participants_with_info(giveaway_id)
-
         if not participants:
             update.message.reply_text("Нет участников")
             return
-
         giveaway_info = db.get_giveaway_info(giveaway_id)
-        name = giveaway_info[1] if giveaway_info else "#{}".format(giveaway_id)
-
-        text = "Участники '{}'
-Всего: {}
-
-".format(name, len(participants))
-
+        name = giveaway_info[1] if giveaway_info else "#" + str(giveaway_id)
+        text = "Участники '" + name + "'\nВсего: " + str(len(participants)) + "\n\n"
         for i, (user_id, username, first_name, is_banned, join_date) in enumerate(participants[:50], 1):
             status = "BAN" if is_banned == 1 else "OK"
-            username_str = "@{}".format(username) if username else "нет"
-            text += "{}. {} {} ({}) - {}
-".format(i, status, first_name, username_str, user_id)
-
+            username_str = "@" + username if username else "нет"
+            text += str(i) + ". " + status + " " + first_name + " (" + username_str + ") - " + str(user_id) + "\n"
         if len(participants) > 50:
-            text += "
-...и еще {}".format(len(participants) - 50)
-
+            text += "\n...и еще " + str(len(participants) - 50)
         update.message.reply_text(text)
     except Exception as e:
-        update.message.reply_text("Ошибка: {}".format(str(e)))
+        update.message.reply_text("Ошибка: " + str(e))
 
 def remove_participant(update, context):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("Нет прав")
         return
-
     if len(context.args) < 2:
         update.message.reply_text("Использование: /remove <giveaway_id> <user_id>")
         return
-
     try:
         giveaway_id = int(context.args[0])
         user_id = int(context.args[1])
-
         if db.remove_participant(giveaway_id, user_id):
-            update.message.reply_text("Участник {} удален из {}".format(user_id, giveaway_id))
+            update.message.reply_text("Участник " + str(user_id) + " удален из " + str(giveaway_id))
         else:
             update.message.reply_text("Не найден")
     except Exception as e:
-        update.message.reply_text("Ошибка: {}".format(str(e)))
+        update.message.reply_text("Ошибка: " + str(e))
 
 def ban_user(update, context):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("Нет прав")
         return
-
     if len(context.args) < 2:
         update.message.reply_text("Использование: /ban <user_id> <причина> [дней]")
         return
-
     try:
         user_id = int(context.args[0])
-
         if len(context.args) > 2 and context.args[-1].isdigit():
             days = int(context.args[-1])
             reason = ' '.join(context.args[1:-1])
         else:
             days = 30
             reason = ' '.join(context.args[1:])
-
         admin_id = update.effective_user.id
         if db.ban_user(user_id, admin_id, reason, days):
             try:
-                context.bot.send_message(chat_id=user_id, text="ВЫ ЗАБАНЕНЫ!
-
-Причина: {}
-Срок: {} дней".format(reason, days))
+                context.bot.send_message(chat_id=user_id, text="ВЫ ЗАБАНЕНЫ!\n\nПричина: " + reason + "\nСрок: " + str(days) + " дней")
             except:
                 pass
-
-            update.message.reply_text("Пользователь {} забанен
-Причина: {}
-Срок: {} дней".format(user_id, reason, days))
+            update.message.reply_text("Пользователь " + str(user_id) + " забанен\nПричина: " + reason + "\nСрок: " + str(days) + " дней")
         else:
             update.message.reply_text("Ошибка")
     except Exception as e:
-        update.message.reply_text("Ошибка: {}".format(str(e)))
+        update.message.reply_text("Ошибка: " + str(e))
 
 def unban_user(update, context):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("Нет прав")
         return
-
     if not context.args:
         update.message.reply_text("Использование: /unban <user_id>")
         return
-
     try:
         user_id = int(context.args[0])
         if db.unban_user(user_id):
@@ -872,223 +638,144 @@ def unban_user(update, context):
                 context.bot.send_message(chat_id=user_id, text="Вы разбанены!")
             except:
                 pass
-
-            update.message.reply_text("Пользователь {} разбанен".format(user_id))
+            update.message.reply_text("Пользователь " + str(user_id) + " разбанен")
         else:
             update.message.reply_text("Ошибка")
     except Exception as e:
-        update.message.reply_text("Ошибка: {}".format(str(e)))
+        update.message.reply_text("Ошибка: " + str(e))
 
 def banned_list(update, context):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("Нет прав")
         return
-
     banned_users = db.get_banned_users()
-
     if not banned_users:
         update.message.reply_text("Нет забаненных")
         return
-
-    text = "Забаненные ({})
-
-".format(len(banned_users))
-
+    text = "Забаненные (" + str(len(banned_users)) + ")\n\n"
     for user in banned_users[:30]:
         user_id, username, first_name, reason, ban_date = user
         ban_dt = datetime.fromisoformat(ban_date) if ban_date else None
         date_str = ban_dt.strftime('%d.%m.%Y') if ban_dt else 'неизвестно'
-        username_str = "@{}".format(username) if username else "нет"
-
-        text += "{} ({}) - {}
-{}
-Дата: {}
-------
-".format(first_name, username_str, user_id, reason, date_str)
-
+        username_str = "@" + username if username else "нет"
+        text += first_name + " (" + username_str + ") - " + str(user_id) + "\n" + reason + "\nДата: " + date_str + "\n------\n"
     if len(banned_users) > 30:
-        text += "
-...и еще {}".format(len(banned_users) - 30)
-
+        text += "\n...и еще " + str(len(banned_users) - 30)
     update.message.reply_text(text)
 
 def check_multi(update, context):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("Нет прав")
         return
-
     threshold = int(context.args[0]) if context.args and context.args[0].isdigit() else 2
     suspicious_ips = db.get_suspicious_ips(threshold)
-
     if not suspicious_ips:
-        update.message.reply_text("Не найдено IP с {}+ аккаунтами".format(threshold))
+        update.message.reply_text("Не найдено IP с " + str(threshold) + "+ аккаунтами")
         return
-
-    text = "Подозрительные IP ({}+):
-
-".format(threshold)
-
+    text = "Подозрительные IP (" + str(threshold) + "+):\n\n"
     for ip_hash, user_count, last_seen in suspicious_ips[:10]:
         users = db.get_users_by_ip(ip_hash)
-        text += "IP: {}...
-Аккаунтов: {}
-".format(ip_hash[:16], user_count)
-
+        text += "IP: " + ip_hash[:16] + "...\nАккаунтов: " + str(user_count) + "\n"
         for user in users[:5]:
             user_id, username, first_name, joined_date = user
-            username_str = "@{}".format(username) if username else "нет"
-            text += "  {} ({}) - {}
-".format(first_name, username_str, user_id)
-
+            username_str = "@" + username if username else "нет"
+            text += "  " + first_name + " (" + username_str + ") - " + str(user_id) + "\n"
         if len(users) > 5:
-            text += "  ...и еще {}
-".format(len(users) - 5)
-
-        text += "------
-"
-
+            text += "  ...и еще " + str(len(users) - 5) + "\n"
+        text += "------\n"
     if len(suspicious_ips) > 10:
-        text += "
-...и еще {}".format(len(suspicious_ips) - 10)
-
+        text += "\n...и еще " + str(len(suspicious_ips) - 10)
     update.message.reply_text(text)
 
 def verify_info(update, context):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("Нет прав")
         return
-
     if not context.args:
         update.message.reply_text("Использование: /verify_info <user_id>")
         return
-
     try:
         user_id = int(context.args[0])
         info = db.get_verification_info(user_id)
-
         if not info:
-            update.message.reply_text("Пользователь {} не найден".format(user_id))
+            update.message.reply_text("Пользователь " + str(user_id) + " не найден")
             return
-
         is_verified, ver_date, ver_method, attempts = info
-
-        text = "Верификация {}
-
-".format(user_id)
-        text += "Статус: {}
-".format("Верифицирован" if is_verified == 1 else "НЕ верифицирован")
-
+        text = "Верификация " + str(user_id) + "\n\n"
+        text += "Статус: " + ("Верифицирован" if is_verified == 1 else "НЕ верифицирован") + "\n"
         if ver_date:
             ver_dt = datetime.fromisoformat(ver_date)
-            text += "Дата: {}
-".format(ver_dt.strftime('%d.%m.%Y %H:%M'))
-
+            text += "Дата: " + ver_dt.strftime('%d.%m.%Y %H:%M') + "\n"
         if ver_method:
-            text += "Метод: {}
-".format(ver_method)
-
-        text += "Попыток: {}
-".format(attempts)
-
+            text += "Метод: " + ver_method + "\n"
+        text += "Попыток: " + str(attempts) + "\n"
         history = db.get_verification_history(user_id, 5)
         if history:
-            text += "
-Последние попытки:
-"
+            text += "\nПоследние попытки:\n"
             for ver_type, success, attempt_date, ip_hash in history:
                 attempt_dt = datetime.fromisoformat(attempt_date)
                 status_icon = "OK" if success == 1 else "FAIL"
-                text += "{} {}
-".format(status_icon, attempt_dt.strftime('%d.%m %H:%M'))
-
+                text += status_icon + " " + attempt_dt.strftime('%d.%m %H:%M') + "\n"
         update.message.reply_text(text)
     except Exception as e:
-        update.message.reply_text("Ошибка: {}".format(str(e)))
+        update.message.reply_text("Ошибка: " + str(e))
 
-# Обработчик кнопок
 def button_handler(update, context):
     query = update.callback_query
     user_id = query.from_user.id
-
     try:
         query.answer()
     except:
         pass
-
     if query.data.startswith('join_'):
         giveaway_id = int(query.data.split('_')[1])
-
         if db.is_banned(user_id):
             query.answer("Вы забанены", show_alert=True)
             return
-
         if not db.is_verified(user_id):
             try:
-                context.bot.send_message(chat_id=user_id, text="Необходима верификация!
-
-Напишите /verify")
+                context.bot.send_message(chat_id=user_id, text="Необходима верификация!\n\nНапишите /verify")
                 query.answer("Пройдите проверку!", show_alert=True)
             except:
                 query.answer("Напишите боту /verify", show_alert=True)
             return
-
         giveaway_info = db.get_giveaway_info(giveaway_id)
         if not giveaway_info or giveaway_info[6] == 0:
             query.answer("Розыгрыш завершен", show_alert=True)
             return
-
         end_time = datetime.fromisoformat(giveaway_info[5])
         if datetime.now() > end_time:
             query.answer("Время истекло", show_alert=True)
             return
-
         multi_accounts = db.check_multiple_accounts(user_id)
         if multi_accounts and len(multi_accounts) >= 2:
             query.answer("Обнаружены мультиаккаунты!", show_alert=True)
-
         referrer_id = context.user_data.get('referrer') if context.user_data.get('giveaway') == giveaway_id else None
-
         if db.add_participant(giveaway_id, user_id, referred_by=referrer_id):
             participants_count = db.get_participants_count(giveaway_id)
-
             if 'referrer' in context.user_data:
                 del context.user_data['referrer']
             if 'giveaway' in context.user_data:
                 del context.user_data['giveaway']
-
             try:
-                context.bot.send_message(
-                    chat_id=user_id,
-                    text="Вы участвуете!
-
-{}
-Победителей: {}
-Участников: {}
-
-Используйте /my_referrals".format(
-                        giveaway_info[1], giveaway_info[3], participants_count)
-                )
+                context.bot.send_message(chat_id=user_id, text="Вы участвуете!\n\n" + giveaway_info[1] + "\nПобедителей: " + str(giveaway_info[3]) + "\nУчастников: " + str(participants_count) + "\n\nИспользуйте /my_referrals")
             except:
                 pass
-
-            query.answer("Вы участвуете! Всего: {}".format(participants_count), show_alert=True)
+            query.answer("Вы участвуете! Всего: " + str(participants_count), show_alert=True)
         else:
             query.answer("Вы уже участвуете", show_alert=True)
 
-# Запуск
 def main():
     print("="*70)
     print("БОТ ДЛЯ РОЗЫГРЫШЕЙ")
     print("="*70)
-    print("Токен: {}...".format(BOT_TOKEN[:15]))
-    print("Админы: {}".format(ADMIN_IDS))
-    print("Канал: {}".format(CHANNEL_ID))
+    print("Токен: " + BOT_TOKEN[:15] + "...")
+    print("Админы: " + str(ADMIN_IDS))
+    print("Канал: " + CHANNEL_ID)
     print("="*70)
-
     try:
         updater = Updater(BOT_TOKEN, use_context=True)
         dp = updater.dispatcher
-
         dp.add_handler(CommandHandler("start", start))
         dp.add_handler(CommandHandler("verify", verify))
         dp.add_handler(CommandHandler("my_referrals", my_referrals))
@@ -1106,17 +793,14 @@ def main():
         dp.add_handler(CommandHandler("verify_info", verify_info))
         dp.add_handler(CallbackQueryHandler(button_handler))
         dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
-
         updater.start_polling()
         print("="*70)
         print("БОТ ЗАПУЩЕН!")
         print("="*70)
-
         updater.idle()
-
     except Exception as e:
-        logger.error("Ошибка: {}".format(e))
-        print("Ошибка: {}".format(e))
+        logger.error("Ошибка: " + str(e))
+        print("Ошибка: " + str(e))
 
 if __name__ == '__main__':
     main()
