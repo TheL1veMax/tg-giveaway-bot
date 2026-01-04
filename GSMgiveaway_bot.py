@@ -188,7 +188,6 @@ class Database:
 
             self.conn.commit()
 
-            # Проверка
             self.cursor.execute('SELECT is_verified FROM users WHERE user_id = ?', (user_id,))
             result = self.cursor.fetchone()
 
@@ -218,13 +217,10 @@ class Database:
             if result:
                 is_verified = result[0]
                 if is_verified == 1:
-                    logger.info(f"User {user_id} is verified")
                     return True
                 else:
-                    logger.info(f"User {user_id} is NOT verified")
                     return False
             else:
-                logger.warning(f"User {user_id} not found")
                 return False
 
         except Exception as e:
@@ -393,6 +389,32 @@ class Database:
         except:
             return None
 
+    def get_suspicious_ips(self, threshold=2):
+        """Подозрительные IP"""
+        try:
+            self.cursor.execute("""
+                SELECT ip_hash, user_count, last_seen 
+                FROM ip_addresses 
+                WHERE user_count >= ?
+                ORDER BY user_count DESC
+            """, (threshold,))
+            return self.cursor.fetchall()
+        except:
+            return []
+
+    def get_users_by_ip(self, ip_hash):
+        """Пользователи по IP"""
+        try:
+            self.cursor.execute("""
+                SELECT user_id, username, first_name, joined_date 
+                FROM users 
+                WHERE ip_hash = ? 
+                ORDER BY joined_date
+            """, (ip_hash,))
+            return self.cursor.fetchall()
+        except:
+            return []
+
     def check_multiple_accounts(self, user_id):
         """Проверить мультиаккаунты"""
         try:
@@ -473,6 +495,20 @@ class Database:
         except:
             return 0
 
+    def get_referrals_list(self, user_id, giveaway_id):
+        """Список рефералов"""
+        try:
+            self.cursor.execute("""
+                SELECT r.referred_id, u.username, u.first_name, r.referral_date
+                FROM referrals r
+                LEFT JOIN users u ON r.referred_id = u.user_id
+                WHERE r.referrer_id = ? AND r.giveaway_id = ?
+                ORDER BY r.referral_date DESC
+            """, (user_id, giveaway_id))
+            return self.cursor.fetchall()
+        except:
+            return []
+
     def get_bonus_entries(self, user_id, giveaway_id):
         """Бонусные заявки"""
         try:
@@ -534,6 +570,20 @@ class Database:
         except:
             return []
 
+    def get_participants_with_info(self, giveaway_id):
+        """Участники с информацией"""
+        try:
+            self.cursor.execute("""
+                SELECT p.user_id, u.username, u.first_name, u.is_banned, p.join_date
+                FROM participants p
+                LEFT JOIN users u ON p.user_id = u.user_id
+                WHERE p.giveaway_id = ? AND p.is_valid = 1
+                ORDER BY p.join_date
+            """, (giveaway_id,))
+            return self.cursor.fetchall()
+        except:
+            return []
+
     def get_participants_count(self, giveaway_id):
         """Количество участников"""
         try:
@@ -553,6 +603,20 @@ class Database:
             return True
         except:
             return False
+
+    def get_user_participations(self, user_id):
+        """Участие пользователя"""
+        try:
+            self.cursor.execute("""
+                SELECT g.id, g.name, g.end_date, p.join_date
+                FROM participants p
+                JOIN giveaways g ON p.giveaway_id = g.id
+                WHERE p.user_id = ? AND p.is_valid = 1 AND g.is_active = 1
+                ORDER BY g.end_date
+            """, (user_id,))
+            return self.cursor.fetchall()
+        except:
+            return []
 
 # Инициализация БД
 db = Database()
@@ -588,7 +652,7 @@ def is_admin(user_id):
     """Проверка админа"""
     return user_id in ADMIN_IDS
 
-# ================== КОМАНДЫ ==================
+# ================== КОМАНДЫ ПОЛЬЗОВАТЕЛЕЙ ==================
 def start(update: Update, context: CallbackContext):
     """Команда /start"""
     user = update.effective_user
@@ -621,9 +685,16 @@ def start(update: Update, context: CallbackContext):
             pass
 
     text = (
-        f"👋 Привет, {user.first_name}!\n\n"
-        "🎉 *Бот для розыгрышей*\n\n"
-        "/verify - Пройти проверку\n"
+        f"👋 Привет, {user.first_name}!
+
+"
+        "🎉 *Бот для розыгрышей*
+
+"
+        "/verify - Пройти проверку
+"
+        "/my_referrals - Мои рефералы
+"
         "/help - Помощь"
     )
 
@@ -657,8 +728,12 @@ def verify(update: Update, context: CallbackContext):
     }
 
     update.message.reply_text(
-        f"🔐 *Пройдите проверку*\n\n"
-        f"Решите: `{question} = ?`\n\n"
+        f"🔐 *Пройдите проверку*
+
+"
+        f"Решите: `{question} = ?`
+
+"
         "Отправьте ответ числом.",
         parse_mode=ParseMode.MARKDOWN
     )
@@ -694,7 +769,9 @@ def handle_text(update: Update, context: CallbackContext):
                 if multi_accounts:
                     update.message.reply_text("⚠️ Обнаружены мультиаккаунты.")
 
-                update.message.reply_text("✅ *Проверка пройдена!*\n\nТеперь можете участвовать!", parse_mode=ParseMode.MARKDOWN)
+                update.message.reply_text("✅ *Проверка пройдена!*
+
+Теперь можете участвовать!", parse_mode=ParseMode.MARKDOWN)
             else:
                 update.message.reply_text("❌ Ошибка! Попробуйте /verify")
         else:
@@ -708,17 +785,106 @@ def handle_text(update: Update, context: CallbackContext):
                 left = 3 - captcha['attempts']
                 update.message.reply_text(f"❌ Неверно. Осталось: {left}")
 
-def help_cmd(update: Update, context: CallbackContext):
-    """Помощь"""
-    text = (
-        "❓ *Помощь*\n\n"
-        "1. /start - Начать\n"
-        "2. /verify - Пройти проверку\n"
-        "3. Участвуйте в розыгрышах\n\n"
-        "/help - Эта справка"
-    )
+def my_referrals(update: Update, context: CallbackContext):
+    """Мои рефералы"""
+    user_id = update.effective_user.id
+
+    if db.is_banned(user_id):
+        update.message.reply_text("🚫 Вы забанены")
+        return
+
+    if not db.is_verified(user_id):
+        update.message.reply_text("❌ Сначала пройдите проверку: /verify")
+        return
+
+    active_giveaways = db.get_active_giveaways()
+
+    if not active_giveaways:
+        update.message.reply_text("❌ Нет активных розыгрышей")
+        return
+
+    text = "🎁 *Ваши реферальные ссылки:*
+
+"
+
+    for g in active_giveaways:
+        gid, name, winners, end_date = g
+        referral_count = db.get_referral_count(user_id, gid)
+        bonus_entries = db.get_bonus_entries(user_id, gid)
+
+        bot_username = context.bot.get_me().username
+        ref_link = f"https://t.me/{bot_username}?start=ref_{gid}_{user_id}"
+
+        text += (
+            f"🏆 *{name}*
+"
+            f"🔗 `{ref_link}`
+"
+            f"👥 Приглашено: {referral_count}
+"
+            f"🎟 Бонусных билетов: {bonus_entries}
+"
+            f"──────
+"
+        )
+
+    text += "
+💡 Отправьте ссылку друзьям для получения бонусных билетов!"
+
     update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
+def help_cmd(update: Update, context: CallbackContext):
+    """Помощь"""
+    user_id = update.effective_user.id
+
+    text = (
+        "❓ *Помощь*
+
+"
+        "🎁 *Команды пользователя:*
+"
+        "/start - Начать работу
+"
+        "/verify - Пройти проверку
+"
+        "/my_referrals - Мои рефералы
+"
+        "/help - Эта справка
+"
+    )
+
+    if is_admin(user_id):
+        text += (
+            "
+🔧 *Команды администратора:*
+"
+            "/new - Создать розыгрыш
+"
+            "/list - Список розыгрышей
+"
+            "/end - Завершить розыгрыш
+"
+            "/stats - Статистика розыгрыша
+"
+            "/participants - Список участников
+"
+            "/remove - Удалить участника
+"
+            "/ban - Забанить пользователя
+"
+            "/unban - Разбанить пользователя
+"
+            "/banned - Список забаненных
+"
+            "/check_multi - Проверка мультиаккаунтов
+"
+            "/verify_info - Информация о верификации
+"
+        )
+
+    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+# ================== АДМИН-КОМАНДЫ ==================
 def new_giveaway(update: Update, context: CallbackContext):
     """Создать розыгрыш"""
     if not is_admin(update.effective_user.id):
@@ -726,7 +892,17 @@ def new_giveaway(update: Update, context: CallbackContext):
         return
 
     if len(context.args) < 2:
-        update.message.reply_text("Использование: /new <название> <победителей> [часы] [описание]")
+        update.message.reply_text(
+            "📝 *Использование:*
+"
+            "`/new <название> <победителей> [часы] [описание]`
+
+"
+            "*Пример:*
+"
+            "`/new Футболка 1 48 Крутая футболка`",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     name = context.args[0]
@@ -737,7 +913,7 @@ def new_giveaway(update: Update, context: CallbackContext):
     giveaway_id = db.create_giveaway(name, description, winners, hours, CHANNEL_ID)
 
     if not giveaway_id:
-        update.message.reply_text("❌ Ошибка")
+        update.message.reply_text("❌ Ошибка создания")
         return
 
     end_time = datetime.now() + timedelta(hours=hours)
@@ -749,20 +925,36 @@ def new_giveaway(update: Update, context: CallbackContext):
         message = context.bot.send_message(
             chat_id=CHANNEL_ID,
             text=(
-                f"🎉 *НОВЫЙ РОЗЫГРЫШ!*\n\n"
-                f"🏆 *{name}*\n"
-                f"📝 {description}\n\n"
-                f"👑 Победителей: {winners}\n"
-                f"⏰ Завершится: {end_time.strftime('%d.%m.%Y в %H:%M')}"
+                f"🎉 *НОВЫЙ РОЗЫГРЫШ!*
+
+"
+                f"🏆 *{name}*
+"
+                f"📝 {description}
+
+"
+                f"👑 Победителей: {winners}
+"
+                f"⏰ Завершится: {end_time.strftime('%d.%m.%Y в %H:%M')}
+
+"
+                f"👇 Нажмите кнопку для участия!"
             ),
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=markup
         )
 
         db.update_message_id(giveaway_id, message.message_id)
-        update.message.reply_text(f"✅ Создан! ID: {giveaway_id}")
+        update.message.reply_text(
+            f"✅ Розыгрыш создан!
+"
+            f"🆔 ID: {giveaway_id}
+"
+            f"📢 Опубликовано в канале",
+            parse_mode=ParseMode.MARKDOWN
+        )
     except Exception as e:
-        update.message.reply_text(f"❌ Ошибка: {str(e)}")
+        update.message.reply_text(f"❌ Ошибка публикации: {str(e)}")
 
 def list_giveaways(update: Update, context: CallbackContext):
     """Список розыгрышей"""
@@ -773,14 +965,38 @@ def list_giveaways(update: Update, context: CallbackContext):
     giveaways = db.get_active_giveaways()
 
     if not giveaways:
-        update.message.reply_text("📭 Нет розыгрышей")
+        update.message.reply_text("📭 Нет активных розыгрышей")
         return
 
-    text = "📋 *Активные:*\n\n"
+    text = "📋 *Активные розыгрыши:*
+
+"
     for g in giveaways:
         gid, name, winners, end_date = g
+        end = datetime.fromisoformat(end_date)
+        left = end - datetime.now()
+
+        if left.total_seconds() <= 0:
+            continue
+
         participants = db.get_participants_count(gid)
-        text += f"🎯 ID: {gid}\n🎁 {name}\n👥 {participants}\n──────\n"
+        hours = int(left.total_seconds() // 3600)
+        minutes = int((left.total_seconds() % 3600) // 60)
+
+        text += (
+            f"🎯 *ID: {gid}*
+"
+            f"🎁 {name}
+"
+            f"👥 Участников: {participants}
+"
+            f"👑 Победителей: {winners}
+"
+            f"⏳ Осталось: {hours}ч {minutes}мин
+"
+            f"──────
+"
+        )
 
     update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -791,7 +1007,17 @@ def end_giveaway(update: Update, context: CallbackContext):
         return
 
     if not context.args:
-        update.message.reply_text("Использование: /end <id>")
+        update.message.reply_text(
+            "📝 *Использование:*
+"
+            "`/end <giveaway_id>`
+
+"
+            "*Пример:*
+"
+            "`/end 1`",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     try:
@@ -799,25 +1025,32 @@ def end_giveaway(update: Update, context: CallbackContext):
         participants = db.get_participants(giveaway_id)
 
         if not participants:
-            update.message.reply_text("❌ Нет участников")
+            update.message.reply_text("❌ Нет участников в этом розыгрыше")
             return
 
         giveaway_info = db.get_giveaway_info(giveaway_id)
         if not giveaway_info:
-            update.message.reply_text("❌ Не найден")
+            update.message.reply_text("❌ Розыгрыш не найден")
             return
 
         winner_count = min(giveaway_info[3], len(participants))
         winners = random.sample(participants, winner_count)
 
-        winners_text = "🏆 *ПОБЕДИТЕЛИ:*\n\n"
+        winners_text = "🏆 *ПОБЕДИТЕЛИ РОЗЫГРЫША!*
+
+"
         for i, winner_id in enumerate(winners, 1):
             try:
                 user = context.bot.get_chat(winner_id)
                 username = f"@{user.username}" if user.username else user.first_name
-                winners_text += f"{i}. {username}\n"
+                winners_text += f"{i}. {username}
+"
             except:
-                winners_text += f"{i}. ID: {winner_id}\n"
+                winners_text += f"{i}. ID: {winner_id}
+"
+
+        winners_text += "
+🎉 Поздравляем!"
 
         db.end_giveaway(giveaway_id)
 
@@ -826,59 +1059,374 @@ def end_giveaway(update: Update, context: CallbackContext):
         except:
             pass
 
-        update.message.reply_text(f"✅ Завершен!\n\n{winners_text}", parse_mode=ParseMode.MARKDOWN)
+        update.message.reply_text(
+            f"✅ Розыгрыш #{giveaway_id} завершен!
+
+{winners_text}",
+            parse_mode=ParseMode.MARKDOWN
+        )
     except Exception as e:
         update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
-def ban_user(update: Update, context: CallbackContext):
-    """Забанить"""
+def stats(update: Update, context: CallbackContext):
+    """Статистика розыгрыша"""
+    if not is_admin(update.effective_user.id):
+        update.message.reply_text("❌ Нет прав")
+        return
+
+    if not context.args:
+        update.message.reply_text(
+            "📝 *Использование:*
+"
+            "`/stats <giveaway_id>`
+
+"
+            "*Пример:*
+"
+            "`/stats 1`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    try:
+        giveaway_id = int(context.args[0])
+        giveaway_info = db.get_giveaway_info(giveaway_id)
+
+        if not giveaway_info:
+            update.message.reply_text("❌ Розыгрыш не найден")
+            return
+
+        participants_count = db.get_participants_count(giveaway_id)
+        _, name, description, winners, start_date, end_date, is_active, _, _ = giveaway_info
+
+        start = datetime.fromisoformat(start_date)
+        end = datetime.fromisoformat(end_date)
+        status = "✅ Активен" if is_active == 1 else "❌ Завершен"
+
+        time_left = end - datetime.now()
+        if time_left.total_seconds() > 0 and is_active == 1:
+            hours = int(time_left.total_seconds() // 3600)
+            minutes = int((time_left.total_seconds() % 3600) // 60)
+            time_info = f"⏳ Осталось: {hours}ч {minutes}мин"
+        else:
+            time_info = "⏰ Завершен"
+
+        text = (
+            f"📊 *Статистика розыгрыша #{giveaway_id}*
+
+"
+            f"🎁 *Название:* {name}
+"
+            f"📝 *Описание:* {description}
+"
+            f"👑 *Победителей:* {winners}
+"
+            f"👥 *Участников:* {participants_count}
+"
+            f"🔄 *Статус:* {status}
+
+"
+            f"📅 *Начало:* {start.strftime('%d.%m.%Y %H:%M')}
+"
+            f"📅 *Конец:* {end.strftime('%d.%m.%Y %H:%M')}
+"
+            f"{time_info}"
+        )
+
+        update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+def participants_cmd(update: Update, context: CallbackContext):
+    """Список участников"""
+    if not is_admin(update.effective_user.id):
+        update.message.reply_text("❌ Нет прав")
+        return
+
+    if not context.args:
+        update.message.reply_text(
+            "📝 *Использование:*
+"
+            "`/participants <giveaway_id>`
+
+"
+            "*Пример:*
+"
+            "`/participants 1`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    try:
+        giveaway_id = int(context.args[0])
+        participants = db.get_participants_with_info(giveaway_id)
+
+        if not participants:
+            update.message.reply_text("❌ Нет участников в этом розыгрыше")
+            return
+
+        giveaway_info = db.get_giveaway_info(giveaway_id)
+        name = giveaway_info[1] if giveaway_info else f"#{giveaway_id}"
+
+        text = f"👥 *Участники розыгрыша '{name}'*
+"
+        text += f"Всего: {len(participants)}
+
+"
+
+        for i, (user_id, username, first_name, is_banned, join_date) in enumerate(participants[:50], 1):
+            status = "🚫" if is_banned == 1 else "✅"
+            username_str = f"@{username}" if username else "нет"
+            text += f"{i}. {status} {first_name} ({username_str}) - `{user_id}`
+"
+
+        if len(participants) > 50:
+            text += f"
+...и еще {len(participants) - 50} участников"
+
+        update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+def remove_participant(update: Update, context: CallbackContext):
+    """Удалить участника"""
     if not is_admin(update.effective_user.id):
         update.message.reply_text("❌ Нет прав")
         return
 
     if len(context.args) < 2:
-        update.message.reply_text("Использование: /ban <user_id> <причина>")
+        update.message.reply_text(
+            "📝 *Использование:*
+"
+            "`/remove <giveaway_id> <user_id>`
+
+"
+            "*Пример:*
+"
+            "`/remove 1 123456789`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    try:
+        giveaway_id = int(context.args[0])
+        user_id = int(context.args[1])
+
+        if db.remove_participant(giveaway_id, user_id):
+            update.message.reply_text(
+                f"✅ Участник `{user_id}` удален из розыгрыша #{giveaway_id}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            update.message.reply_text("❌ Участник не найден")
+    except Exception as e:
+        update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+def ban_user(update: Update, context: CallbackContext):
+    """Забанить пользователя"""
+    if not is_admin(update.effective_user.id):
+        update.message.reply_text("❌ Нет прав")
+        return
+
+    if len(context.args) < 2:
+        update.message.reply_text(
+            "📝 *Использование:*
+"
+            "`/ban <user_id> <причина> [дней]`
+
+"
+            "*Примеры:*
+"
+            "`/ban 123456789 Мультиаккаунты`
+"
+            "`/ban 123456789 Спам 7`",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     try:
         user_id = int(context.args[0])
-        reason = ' '.join(context.args[1:])
+
+        # Определяем причину и количество дней
+        if len(context.args) > 2 and context.args[-1].isdigit():
+            days = int(context.args[-1])
+            reason = ' '.join(context.args[1:-1])
+        else:
+            days = 30
+            reason = ' '.join(context.args[1:])
 
         admin_id = update.effective_user.id
-        if db.ban_user(user_id, admin_id, reason):
-            update.message.reply_text(f"✅ Забанен: {user_id}")
+        if db.ban_user(user_id, admin_id, reason, days):
+            try:
+                context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"🚫 *ВЫ ЗАБАНЕНЫ!*
+
+📝 Причина: {reason}
+⏰ Срок: {days} дней",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except:
+                pass
+
+            update.message.reply_text(
+                f"✅ Пользователь `{user_id}` забанен
+"
+                f"📝 Причина: {reason}
+"
+                f"⏰ Срок: {days} дней",
+                parse_mode=ParseMode.MARKDOWN
+            )
         else:
-            update.message.reply_text("❌ Ошибка")
-    except:
-        update.message.reply_text("❌ Неверный формат")
+            update.message.reply_text("❌ Ошибка при бане")
+    except Exception as e:
+        update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
 def unban_user(update: Update, context: CallbackContext):
-    """Разбанить"""
+    """Разбанить пользователя"""
     if not is_admin(update.effective_user.id):
         update.message.reply_text("❌ Нет прав")
         return
 
     if not context.args:
-        update.message.reply_text("Использование: /unban <user_id>")
+        update.message.reply_text(
+            "📝 *Использование:*
+"
+            "`/unban <user_id>`
+
+"
+            "*Пример:*
+"
+            "`/unban 123456789`",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     try:
         user_id = int(context.args[0])
         if db.unban_user(user_id):
-            update.message.reply_text(f"✅ Разбанен: {user_id}")
+            try:
+                context.bot.send_message(
+                    chat_id=user_id,
+                    text="✅ Вы разбанены! Теперь можете участвовать в розыгрышах."
+                )
+            except:
+                pass
+
+            update.message.reply_text(
+                f"✅ Пользователь `{user_id}` разбанен",
+                parse_mode=ParseMode.MARKDOWN
+            )
         else:
-            update.message.reply_text("❌ Ошибка")
-    except:
-        update.message.reply_text("❌ Неверный ID")
+            update.message.reply_text("❌ Ошибка при разбане")
+    except Exception as e:
+        update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+def banned_list(update: Update, context: CallbackContext):
+    """Список забаненных"""
+    if not is_admin(update.effective_user.id):
+        update.message.reply_text("❌ Нет прав")
+        return
+
+    banned_users = db.get_banned_users()
+
+    if not banned_users:
+        update.message.reply_text("✅ Нет забаненных пользователей")
+        return
+
+    text = f"🚫 *Забаненные пользователи*
+Всего: {len(banned_users)}
+
+"
+
+    for user in banned_users[:30]:
+        user_id, username, first_name, reason, ban_date = user
+        ban_dt = datetime.fromisoformat(ban_date) if ban_date else None
+        date_str = ban_dt.strftime('%d.%m.%Y') if ban_dt else 'неизвестно'
+
+        username_str = f"@{username}" if username else "нет"
+        text += (
+            f"• {first_name} ({username_str})
+"
+            f"  ID: `{user_id}`
+"
+            f"  Причина: {reason}
+"
+            f"  Дата: {date_str}
+"
+            f"──────
+"
+        )
+
+    if len(banned_users) > 30:
+        text += f"
+...и еще {len(banned_users) - 30} забаненных"
+
+    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+def check_multi(update: Update, context: CallbackContext):
+    """Проверка мультиаккаунтов"""
+    if not is_admin(update.effective_user.id):
+        update.message.reply_text("❌ Нет прав")
+        return
+
+    threshold = int(context.args[0]) if context.args and context.args[0].isdigit() else 2
+    suspicious_ips = db.get_suspicious_ips(threshold)
+
+    if not suspicious_ips:
+        update.message.reply_text(
+            f"✅ Не найдено IP с {threshold}+ аккаунтами"
+        )
+        return
+
+    text = f"🔍 *Подозрительные IP ({threshold}+ аккаунтов):*
+
+"
+
+    for ip_hash, user_count, last_seen in suspicious_ips[:10]:
+        users = db.get_users_by_ip(ip_hash)
+        text += f"🌐 IP: `{ip_hash[:16]}...`
+"
+        text += f"👥 Аккаунтов: {user_count}
+"
+
+        for user in users[:5]:
+            user_id, username, first_name, joined_date = user
+            username_str = f"@{username}" if username else "нет"
+            text += f"  • {first_name} ({username_str}) - `{user_id}`
+"
+
+        if len(users) > 5:
+            text += f"  ...и еще {len(users) - 5}
+"
+
+        text += "──────
+"
+
+    if len(suspicious_ips) > 10:
+        text += f"
+...и еще {len(suspicious_ips) - 10} подозрительных IP"
+
+    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 def verify_info(update: Update, context: CallbackContext):
-    """Информация о верификации"""
+    """Информация о верификации пользователя"""
     if not is_admin(update.effective_user.id):
         update.message.reply_text("❌ Нет прав")
         return
 
     if not context.args:
-        update.message.reply_text("Использование: /verify_info <user_id>")
+        update.message.reply_text(
+            "📝 *Использование:*
+"
+            "`/verify_info <user_id>`
+
+"
+            "*Пример:*
+"
+            "`/verify_info 123456789`",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     try:
@@ -886,27 +1434,51 @@ def verify_info(update: Update, context: CallbackContext):
         info = db.get_verification_info(user_id)
 
         if not info:
-            update.message.reply_text(f"❌ Пользователь {user_id} не найден")
+            update.message.reply_text(f"❌ Пользователь `{user_id}` не найден", parse_mode=ParseMode.MARKDOWN)
             return
 
         is_verified, ver_date, ver_method, attempts = info
 
-        text = f"📋 *Верификация {user_id}*\n\n"
-        text += f"Статус: {'✅ Верифицирован' if is_verified == 1 else '❌ НЕ верифицирован'}\n"
+        text = f"📋 *Информация о верификации*
+Пользователь: `{user_id}`
+
+"
+
+        if is_verified == 1:
+            text += "✅ *Статус:* Верифицирован
+"
+        else:
+            text += "❌ *Статус:* НЕ верифицирован
+"
 
         if ver_date:
             ver_dt = datetime.fromisoformat(ver_date)
-            text += f"Дата: {ver_dt.strftime('%d.%m.%Y %H:%M')}\n"
+            text += f"📅 *Дата:* {ver_dt.strftime('%d.%m.%Y %H:%M')}
+"
 
         if ver_method:
-            text += f"Метод: {ver_method}\n"
+            text += f"🔐 *Метод:* {ver_method}
+"
 
-        text += f"Попыток: {attempts}"
+        text += f"🔢 *Попыток:* {attempts}
+"
+
+        history = db.get_verification_history(user_id, 5)
+        if history:
+            text += "
+📜 *Последние попытки:*
+"
+            for ver_type, success, attempt_date, ip_hash in history:
+                attempt_dt = datetime.fromisoformat(attempt_date)
+                status_icon = "✅" if success == 1 else "❌"
+                text += f"{status_icon} {attempt_dt.strftime('%d.%m %H:%M')} - {ver_type}
+"
 
         update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-    except:
-        update.message.reply_text("❌ Неверный ID")
+    except Exception as e:
+        update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
+# ================== ОБРАБОТЧИК КНОПОК ==================
 def button_handler(update: Update, context: CallbackContext):
     """Обработчик кнопок"""
     query = update.callback_query
@@ -928,18 +1500,29 @@ def button_handler(update: Update, context: CallbackContext):
             try:
                 context.bot.send_message(
                     chat_id=user_id,
-                    text="❌ *Нужна проверка!*\n\nНапишите /verify",
+                    text="❌ *Необходима верификация!*
+
+Напишите мне /verify",
                     parse_mode=ParseMode.MARKDOWN
                 )
-                query.answer("❌ Пройдите проверку!", show_alert=True)
+                query.answer("❌ Пройдите проверку! Проверьте личные сообщения.", show_alert=True)
             except:
-                query.answer("❌ Пройдите проверку: /verify", show_alert=True)
+                query.answer("❌ Напишите боту /verify для проверки", show_alert=True)
             return
 
         giveaway_info = db.get_giveaway_info(giveaway_id)
         if not giveaway_info or giveaway_info[6] == 0:
             query.answer("❌ Розыгрыш завершен", show_alert=True)
             return
+
+        end_time = datetime.fromisoformat(giveaway_info[5])
+        if datetime.now() > end_time:
+            query.answer("⏰ Время участия истекло", show_alert=True)
+            return
+
+        multi_accounts = db.check_multiple_accounts(user_id)
+        if multi_accounts and len(multi_accounts) >= 2:
+            query.answer("⚠️ Обнаружены мультиаккаунты! Администратор уведомлен.", show_alert=True)
 
         referrer_id = context.user_data.get('referrer') if context.user_data.get('giveaway') == giveaway_id else None
 
@@ -954,39 +1537,61 @@ def button_handler(update: Update, context: CallbackContext):
             try:
                 context.bot.send_message(
                     chat_id=user_id,
-                    text=f"✅ Вы участвуете!\n\nУчастников: {participants_count}"
+                    text=(
+                        f"✅ *Вы участвуете в розыгрыше!*
+
+"
+                        f"🎁 {giveaway_info[1]}
+"
+                        f"👑 Победителей: {giveaway_info[3]}
+"
+                        f"👥 Участников сейчас: {participants_count}
+
+"
+                        f"💡 Используйте /my_referrals для получения реферальной ссылки"
+                    ),
+                    parse_mode=ParseMode.MARKDOWN
                 )
             except:
                 pass
 
-            query.answer(f"✅ Участвуете! Всего: {participants_count}", show_alert=True)
+            query.answer(f"✅ Вы участвуете! Всего участников: {participants_count}", show_alert=True)
         else:
-            query.answer("⚠️ Вы уже участвуете", show_alert=True)
+            query.answer("⚠️ Вы уже участвуете в этом розыгрыше", show_alert=True)
 
 # ================== ЗАПУСК ==================
 def main():
     """Главная функция"""
     print("=" * 70)
-    print("🤖 БОТ ДЛЯ РОЗЫГРЫШЕЙ")
+    print("🤖 БОТ ДЛЯ РОЗЫГРЫШЕЙ (ПОЛНАЯ ВЕРСИЯ)")
     print("=" * 70)
-    print(f"✅ Токен: {BOT_TOKEN[:10]}...")
+    print(f"✅ Токен: {BOT_TOKEN[:15]}...")
     print(f"👑 Админы: {ADMIN_IDS}")
     print(f"📢 Канал: {CHANNEL_ID}")
     print("=" * 70)
+    print("🔧 Инициализация...")
 
     try:
         updater = Updater(BOT_TOKEN, use_context=True)
         dp = updater.dispatcher
 
-        # Команды
+        # Команды пользователей
         dp.add_handler(CommandHandler("start", start))
         dp.add_handler(CommandHandler("verify", verify))
+        dp.add_handler(CommandHandler("my_referrals", my_referrals))
         dp.add_handler(CommandHandler("help", help_cmd))
+
+        # Админ-команды
         dp.add_handler(CommandHandler("new", new_giveaway))
         dp.add_handler(CommandHandler("list", list_giveaways))
         dp.add_handler(CommandHandler("end", end_giveaway))
+        dp.add_handler(CommandHandler("stats", stats))
+        dp.add_handler(CommandHandler("participants", participants_cmd))
+        dp.add_handler(CommandHandler("remove", remove_participant))
         dp.add_handler(CommandHandler("ban", ban_user))
         dp.add_handler(CommandHandler("unban", unban_user))
+        dp.add_handler(CommandHandler("banned", banned_list))
+        dp.add_handler(CommandHandler("check_multi", check_multi))
         dp.add_handler(CommandHandler("verify_info", verify_info))
 
         # Обработчики
@@ -994,15 +1599,40 @@ def main():
         dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
 
         updater.start_polling()
-        print("✅ БОТ ЗАПУЩЕН!")
-        print("✋ Ctrl+C для остановки")
+        print("=" * 70)
+        print("✅ БОТ ЗАПУЩЕН И РАБОТАЕТ!")
+        print("=" * 70)
+        print("
+📋 ДОСТУПНЫЕ КОМАНДЫ:")
+        print("
+Пользователи:")
+        print("  /start - Начать работу")
+        print("  /verify - Пройти проверку")
+        print("  /my_referrals - Мои рефералы")
+        print("  /help - Помощь")
+        print("
+Администраторы:")
+        print("  /new - Создать розыгрыш")
+        print("  /list - Список розыгрышей")
+        print("  /end - Завершить розыгрыш")
+        print("  /stats - Статистика")
+        print("  /participants - Участники")
+        print("  /remove - Удалить участника")
+        print("  /ban - Забанить")
+        print("  /unban - Разбанить")
+        print("  /banned - Список забаненных")
+        print("  /check_multi - Мультиаккаунты")
+        print("  /verify_info - Инфо о верификации")
+        print("
+" + "=" * 70)
+        print("✋ Нажмите Ctrl+C для остановки")
         print("=" * 70)
 
         updater.idle()
 
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-        print(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Критическая ошибка: {e}")
+        print(f"❌ Ошибка запуска: {e}")
 
 if __name__ == '__main__':
     main()
