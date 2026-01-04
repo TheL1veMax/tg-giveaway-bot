@@ -21,11 +21,7 @@ from telegram.ext import Filters
 from telegram.parsemode import ParseMode
 
 # ================== НАСТРОЙКИ ==================
-from dotenv import load_dotenv
-load_dotenv()
-BOT_TOKEN = os.getenv('8458068573:AAHaKHcWQZOOmTu-z2wu-7kbX8MdhonkS_M')
-if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN не найден! Установите в переменных окружения.")
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8458068573:AAHaKHcWQZOOmTu-z2wu-7kbX8MdhonkS_M')
 ADMIN_IDS = [5207853162, 5406117718]  # Ваш Telegram ID
 CHANNEL_ID = "@sportgagarinmolodezh"  # ID вашего КАНАЛА
 
@@ -440,14 +436,8 @@ def generate_captcha():
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
 def extract_ip_from_request(update):
-    """На облачном хостинге реальный IP недоступен, используем альтернативный метод"""
     user = update.effective_user
-    
-    # Создаём уникальный хеш на основе ID пользователя и имени
-    ip_str = f"{user.id}_{user.username or 'no_username'}"
-    
-    # Возвращаем SHA256 хеш (первые 32 символа)
-    return hashlib.sha256(ip_str.encode()).hexdigest()[:32]
+    return f"{user.id}.{hash(str(user.id)) % 255}.{hash(user.username or '') % 255}"
 
 def is_admin(user_id):
     return user_id in ADMIN_IDS
