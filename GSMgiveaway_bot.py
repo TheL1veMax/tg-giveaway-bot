@@ -21,7 +21,7 @@ from telegram.ext import Filters
 from telegram.parsemode import ParseMode
 
 # ================== НАСТРОЙКИ ==================
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8458068573:AAHaKHcWQZOOmTu-z2wu-7kbX8MdhonkS_M')
+BOT_TOKEN = os.getenv('8458068573:AAHaKHcWQZOOmTu-z2wu-7kbX8MdhonkS_M', '8458068573:AAHaKHcWQZOOmTu-z2wu-7kbX8MdhonkS_M')
 ADMIN_IDS = [5207853162, 5406117718]  # Ваш Telegram ID
 CHANNEL_ID = "@sportgagarinmolodezh"  # ID вашего КАНАЛА
 
@@ -603,6 +603,58 @@ def handle_text(update: Update, context: CallbackContext):
                 update.message.reply_text(f"❌ Неверно. Осталось попыток: {left}")
 
 # ================== КОМАНДЫ ДЛЯ АДМИНОВ ==================
+
+# ================== ОБНОВЛЕНИЕ СООБЩЕНИЯ С УЧАСТНИКАМИ ==================
+def update_giveaway_message(context, giveaway_id):
+    """Обновляет сообщение розыгрыша с актуальным количеством участников"""
+    try:
+        giveaway_info = db.get_giveaway_info(giveaway_id)
+        if not giveaway_info:
+            return
+
+        _, name, description, winners, start_date, end_date, is_active, message_id, channel_id = giveaway_info
+
+        if not message_id or not channel_id:
+            return
+
+        participants_count = db.get_participants_count(giveaway_id)
+        end_time = datetime.fromisoformat(end_date)
+
+        time_left = end_time - datetime.now()
+        days = time_left.days
+        hours_left = time_left.seconds // 3600
+        minutes_left = (time_left.seconds % 3600) // 60
+
+        time_text = ""
+        if days > 0:
+            time_text = f"{days} дней {hours_left} часов"
+        elif hours_left > 0:
+            time_text = f"{hours_left} часов {minutes_left} минут"
+        else:
+            time_text = f"{minutes_left} минут"
+
+        keyboard = [[InlineKeyboardButton("🎟 Участвовать", callback_data=f"join_{giveaway_id}")]]
+        markup = InlineKeyboardMarkup(keyboard)
+
+        context.bot.edit_message_text(
+            chat_id=channel_id,
+            message_id=message_id,
+            text=(
+                f"🎉 *НОВЫЙ РОЗЫГРЫШ!*\n\n"
+                f"🏆 *{name}*\n"
+                f"📝 {description}\n\n"
+                f"👑 *Победителей:* {winners}\n"
+                f"👥 *Участников:* {participants_count}\n"
+                f"⏰ *Завершится через:* {time_text}\n"
+                f"📅 *Дата окончания:* {end_time.strftime('%d.%m.%Y в %H:%M')}\n\n"
+                f"👇 *Нажмите кнопку ниже для участия*"
+            ),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=markup
+        )
+    except Exception as e:
+        logger.error(f"Ошибка обновления сообщения: {e}")
+
 def new_giveaway(update: Update, context: CallbackContext):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("❌ Нет прав")
@@ -648,6 +700,7 @@ def new_giveaway(update: Update, context: CallbackContext):
                 f"🏆 *{name}*\n"
                 f"📝 {description}\n\n"
                 f"👑 *Победителей:* {winners}\n"
+                f"👥 *Участников:* 0\n"
                 f"⏰ *Завершится через:* {time_text}\n"
                 f"📅 *Дата окончания:* {end_time.strftime('%d.%m.%Y в %H:%M')}\n\n"
                 f"👇 *Нажмите кнопку ниже для участия*"
