@@ -7,9 +7,12 @@ import sqlite3
 from datetime import datetime, timedelta
 import os
 import hashlib
+import threading
+import time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, CallbackContext, Filters
+from telegram.error import BadRequest
 
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8458068573:AAHaKHcWQZOOmTu-z2wu-7kbX8MdhonkS_M')
 ADMIN_IDS = [5207853162, 5406117718]
@@ -47,7 +50,8 @@ class Database:
         self.cursor.execute("""CREATE TABLE IF NOT EXISTS giveaways (
             id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT,
             winner_count INTEGER DEFAULT 1, start_date TEXT NOT NULL, end_date TEXT NOT NULL,
-            is_active INTEGER DEFAULT 1, message_id INTEGER, channel_id TEXT)""")
+            is_active INTEGER DEFAULT 1, message_id INTEGER, channel_id TEXT,
+            auto_finish INTEGER DEFAULT 1, require_subscription INTEGER DEFAULT 0)""")
 
         self.cursor.execute("""CREATE TABLE IF NOT EXISTS participants (
             giveaway_id INTEGER NOT NULL, user_id INTEGER NOT NULL, join_date TEXT NOT NULL,
@@ -214,12 +218,12 @@ class Database:
         except:
             return []
 
-    def create_giveaway(self, name, description, winners, hours, channel_id):
+    def create_giveaway(self, name, description, winners, hours, channel_id, require_sub=0):
         try:
             start_date = datetime.now()
             end_date = start_date + timedelta(hours=hours)
-            self.cursor.execute("INSERT INTO giveaways (name, description, winner_count, start_date, end_date, is_active, channel_id) VALUES (?, ?, ?, ?, ?, 1, ?)",
-                (name, description, winners, start_date.isoformat(), end_date.isoformat(), channel_id))
+            self.cursor.execute("INSERT INTO giveaways (name, description, winner_count, start_date, end_date, is_active, channel_id, auto_finish, require_subscription) VALUES (?, ?, ?, ?, ?, 1, ?, 1, ?)",
+                (name, description, winners, start_date.isoformat(), end_date.isoformat(), channel_id, require_sub))
             self.conn.commit()
             return self.cursor.lastrowid
         except:
@@ -265,6 +269,15 @@ class Database:
         except:
             return 0
 
+    def get_top_referrers(self, limit=10):
+        try:
+            self.cursor.execute("""SELECT r.referrer_id, u.username, u.first_name, COUNT(r.referred_id) as ref_count
+                FROM referrals r LEFT JOIN users u ON r.referrer_id = u.user_id
+                GROUP BY r.referrer_id ORDER BY ref_count DESC LIMIT ?""", (limit,))
+            return self.cursor.fetchall()
+        except:
+            return []
+
     def remove_participant(self, giveaway_id, user_id):
         try:
             self.cursor.execute('UPDATE participants SET is_valid = 0 WHERE giveaway_id = ? AND user_id = ?', (giveaway_id, user_id))
@@ -275,7 +288,7 @@ class Database:
 
     def get_active_giveaways(self):
         try:
-            self.cursor.execute('SELECT id, name, winner_count, end_date FROM giveaways WHERE is_active = 1 ORDER BY end_date')
+            self.cursor.execute('SELECT id, name, winner_count, end_date, require_subscription FROM giveaways WHERE is_active = 1 ORDER BY end_date')
             return self.cursor.fetchall()
         except:
             return []
@@ -320,6 +333,14 @@ class Database:
         except:
             return False
 
+    def get_giveaways_to_finish(self):
+        try:
+            current_time = datetime.now().isoformat()
+            self.cursor.execute('SELECT id FROM giveaways WHERE is_active = 1 AND auto_finish = 1 AND end_date <= ?', (current_time,))
+            return [row[0] for row in self.cursor.fetchall()]
+        except:
+            return []
+
 db = Database()
 captcha_storage = {}
 
@@ -346,6 +367,47 @@ def extract_ip_from_request(update):
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
+def check_subscription(bot, user_id, channel_id):
+    try:
+        member = bot.get_chat_member(channel_id, user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except:
+        return False
+
+def format_time_left(end_date):
+    try:
+        end = datetime.fromisoformat(end_date)
+        now = datetime.now()
+        diff = end - now
+        if diff.total_seconds() <= 0:
+            return "Завершен"
+        days = diff.days
+        hours = diff.seconds // 3600
+        minutes = (diff.seconds % 3600) // 60
+        if days > 0:
+            return str(days) + "д " + str(hours) + "ч"
+        elif hours > 0:
+            return str(hours) + "ч " + str(minutes) + "мин"
+        else:
+            return str(minutes) + "мин"
+    except:
+        return "Неизвестно"
+
+def create_progress_bar(end_date, length=10):
+    try:
+        end = datetime.fromisoformat(end_date)
+        now = datetime.now()
+        diff = end - now
+        if diff.total_seconds() <= 0:
+            return "[" + "█" * length + "]"
+        total_hours = 24
+        hours_left = diff.total_seconds() / 3600
+        progress = max(0, min(1, 1 - (hours_left / total_hours)))
+        filled = int(progress * length)
+        return "[" + "█" * filled + "░" * (length - filled) + "]"
+    except:
+        return "[░░░░░░░░░░]"
+
 def start(update, context):
     user = update.effective_user
     db.add_user(user.id, user.username or "", user.first_name, user.last_name or "")
@@ -370,8 +432,19 @@ def start(update, context):
                 return
         except:
             pass
-    text = "Привет, " + user.first_name + "!\n\nБот для розыгрышей\n\n/verify - Пройти проверку\n/my_referrals - Мои рефералы\n/help - Помощь"
-    update.message.reply_text(text)
+
+    keyboard = [
+        [InlineKeyboardButton("Пройти проверку", callback_data="cmd_verify")],
+        [InlineKeyboardButton("Мои рефералы", callback_data="cmd_my_referrals")],
+        [InlineKeyboardButton("Топ рефереров", callback_data="cmd_top")],
+        [InlineKeyboardButton("Помощь", callback_data="cmd_help")]
+    ]
+    if is_admin(user.id):
+        keyboard.append([InlineKeyboardButton("Админ-панель", callback_data="cmd_admin")])
+
+    markup = InlineKeyboardMarkup(keyboard)
+    text = "Привет, " + user.first_name + "!\n\nБот для розыгрышей\n\nВыберите действие:"
+    update.message.reply_text(text, reply_markup=markup)
 
 def verify(update, context):
     if update.message.chat.type != 'private':
@@ -382,7 +455,9 @@ def verify(update, context):
         update.message.reply_text("Вы забанены")
         return
     if db.is_verified(user_id):
-        update.message.reply_text("Вы уже верифицированы!")
+        keyboard = [[InlineKeyboardButton("Главное меню", callback_data="cmd_start")]]
+        markup = InlineKeyboardMarkup(keyboard)
+        update.message.reply_text("Вы уже верифицированы!", reply_markup=markup)
         return
     question, answer = generate_captcha()
     ip = extract_ip_from_request(update)
@@ -412,7 +487,9 @@ def handle_text(update, context):
                 multi_accounts = db.check_multiple_accounts(user_id)
                 if multi_accounts:
                     update.message.reply_text("Обнаружены мультиаккаунты.")
-                update.message.reply_text("Проверка пройдена!\n\nТеперь можете участвовать!")
+                keyboard = [[InlineKeyboardButton("Главное меню", callback_data="cmd_start")]]
+                markup = InlineKeyboardMarkup(keyboard)
+                update.message.reply_text("Проверка пройдена!\n\nТеперь можете участвовать!", reply_markup=markup)
             else:
                 update.message.reply_text("Ошибка! Попробуйте /verify")
         else:
@@ -425,75 +502,203 @@ def handle_text(update, context):
                 left = 3 - captcha['attempts']
                 update.message.reply_text("Неверно. Осталось: " + str(left))
 
-def my_referrals(update, context):
-    user_id = update.effective_user.id
+def my_referrals(update, context, message=None):
+    user_id = update.effective_user.id if update.effective_user else message.from_user.id
+
     if db.is_banned(user_id):
-        update.message.reply_text("Вы забанены")
+        if message:
+            message.edit_text("Вы забанены")
+        else:
+            update.message.reply_text("Вы забанены")
         return
+
     if not db.is_verified(user_id):
-        update.message.reply_text("Сначала пройдите проверку: /verify")
+        keyboard = [[InlineKeyboardButton("Пройти проверку", callback_data="cmd_verify")],
+                    [InlineKeyboardButton("Назад", callback_data="cmd_start")]]
+        markup = InlineKeyboardMarkup(keyboard)
+        if message:
+            message.edit_text("Сначала пройдите проверку", reply_markup=markup)
+        else:
+            update.message.reply_text("Сначала пройдите проверку: /verify", reply_markup=markup)
         return
+
     active_giveaways = db.get_active_giveaways()
     if not active_giveaways:
-        update.message.reply_text("Нет активных розыгрышей")
+        keyboard = [[InlineKeyboardButton("Назад", callback_data="cmd_start")]]
+        markup = InlineKeyboardMarkup(keyboard)
+        if message:
+            message.edit_text("Нет активных розыгрышей", reply_markup=markup)
+        else:
+            update.message.reply_text("Нет активных розыгрышей", reply_markup=markup)
         return
+
     text = "Ваши реферальные ссылки:\n\n"
     for g in active_giveaways:
-        gid, name, winners, end_date = g
+        gid, name, winners, end_date, require_sub = g
         referral_count = db.get_referral_count(user_id, gid)
         bonus_entries = db.get_bonus_entries(user_id, gid)
         bot_username = context.bot.get_me().username
         ref_link = "https://t.me/" + bot_username + "?start=ref_" + str(gid) + "_" + str(user_id)
-        text += name + "\n" + ref_link + "\nПриглашено: " + str(referral_count) + "\nБонусов: " + str(bonus_entries) + "\n------\n"
+        time_left = format_time_left(end_date)
+        text += name + "\n" + ref_link + "\nПриглашено: " + str(referral_count) + "\nБонусов: " + str(bonus_entries) + "\nОсталось: " + time_left + "\n------\n"
     text += "\nОтправьте ссылку друзьям!"
-    update.message.reply_text(text)
 
-def help_cmd(update, context):
-    user_id = update.effective_user.id
-    text = "Помощь\n\nПользователь:\n/start - Начать\n/verify - Проверка\n/my_referrals - Рефералы\n/help - Помощь\n"
+    keyboard = [[InlineKeyboardButton("Назад", callback_data="cmd_start")]]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if message:
+        message.edit_text(text, reply_markup=markup)
+    else:
+        update.message.reply_text(text, reply_markup=markup)
+
+def top_referrers(update, context, message=None):
+    top = db.get_top_referrers(10)
+    if not top:
+        keyboard = [[InlineKeyboardButton("Назад", callback_data="cmd_start")]]
+        markup = InlineKeyboardMarkup(keyboard)
+        text = "Пока нет рефереров"
+        if message:
+            message.edit_text(text, reply_markup=markup)
+        else:
+            update.message.reply_text(text, reply_markup=markup)
+        return
+
+    text = "Топ-10 рефереров:\n\n"
+    medals = ["", "", ""]
+    for i, (user_id, username, first_name, ref_count) in enumerate(top, 1):
+        medal = medals[i-1] if i <= 3 else str(i) + "."
+        username_str = "@" + username if username else first_name
+        text += medal + " " + username_str + " - " + str(ref_count) + "\n"
+
+    keyboard = [[InlineKeyboardButton("Мои рефералы", callback_data="cmd_my_referrals")],
+                [InlineKeyboardButton("Назад", callback_data="cmd_start")]]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if message:
+        message.edit_text(text, reply_markup=markup)
+    else:
+        update.message.reply_text(text, reply_markup=markup)
+
+def help_cmd(update, context, message=None):
+    user_id = update.effective_user.id if update.effective_user else message.from_user.id
+
+    text = "Помощь\n\nПользователь:\n/start - Начать\n/verify - Проверка\n/my_referrals - Рефералы\n/top - Топ рефереров\n/help - Помощь\n"
+
     if is_admin(user_id):
         text += "\nАдмин:\n/new - Создать\n/list - Список\n/end - Завершить\n/stats - Статистика\n/participants - Участники\n/remove - Удалить\n/ban - Забанить\n/unban - Разбанить\n/banned - Забаненные\n/check_multi - Мультиаккаунты\n/verify_info - Инфо\n"
-    update.message.reply_text(text)
+
+    keyboard = [[InlineKeyboardButton("Назад", callback_data="cmd_start")]]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if message:
+        message.edit_text(text, reply_markup=markup)
+    else:
+        update.message.reply_text(text, reply_markup=markup)
+
+def admin_panel(update, context, message=None):
+    user_id = update.effective_user.id if update.effective_user else message.from_user.id
+
+    if not is_admin(user_id):
+        if message:
+            message.edit_text("Нет прав")
+        else:
+            update.message.reply_text("Нет прав")
+        return
+
+    text = "Админ-панель\n\nВыберите действие:"
+    keyboard = [
+        [InlineKeyboardButton("Создать розыгрыш", callback_data="admin_new")],
+        [InlineKeyboardButton("Список розыгрышей", callback_data="admin_list")],
+        [InlineKeyboardButton("Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton("Назад", callback_data="cmd_start")]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if message:
+        message.edit_text(text, reply_markup=markup)
+    else:
+        update.message.reply_text(text, reply_markup=markup)
 
 def new_giveaway(update, context):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("Нет прав")
         return
     if len(context.args) < 2:
-        update.message.reply_text("Использование: /new <название> <победителей> [часы] [описание]")
+        update.message.reply_text("Использование: /new <название> <победителей> [часы] [описание]\n\nДобавьте 'sub' в конце для проверки подписки")
         return
+
     name = context.args[0]
     winners = int(context.args[1])
     hours = int(context.args[2]) if len(context.args) > 2 and context.args[2].isdigit() else 24
-    description = ' '.join(context.args[3:]) if len(context.args) > 3 else "Розыгрыш"
-    giveaway_id = db.create_giveaway(name, description, winners, hours, CHANNEL_ID)
+
+    require_sub = 0
+    description_parts = []
+    for i in range(3 if len(context.args) > 2 and context.args[2].isdigit() else 2, len(context.args)):
+        if context.args[i].lower() == 'sub':
+            require_sub = 1
+        else:
+            description_parts.append(context.args[i])
+
+    description = ' '.join(description_parts) if description_parts else "Розыгрыш"
+
+    giveaway_id = db.create_giveaway(name, description, winners, hours, CHANNEL_ID, require_sub)
     if not giveaway_id:
         update.message.reply_text("Ошибка создания")
         return
+
     end_time = datetime.now() + timedelta(hours=hours)
+    progress = create_progress_bar(end_time.isoformat())
+
     keyboard = [[InlineKeyboardButton("Участвовать", callback_data="join_" + str(giveaway_id))]]
     markup = InlineKeyboardMarkup(keyboard)
+
+    sub_text = "\n\nТребуется подписка на канал!" if require_sub == 1 else ""
+
     try:
-        message = context.bot.send_message(chat_id=CHANNEL_ID, text="НОВЫЙ РОЗЫГРЫШ!\n\n" + name + "\n" + description + "\n\nПобедителей: " + str(winners) + "\nЗавершится: " + end_time.strftime('%d.%m.%Y в %H:%M') + "\n\nНажмите кнопку!", reply_markup=markup)
+        message = context.bot.send_message(chat_id=CHANNEL_ID, 
+            text="НОВЫЙ РОЗЫГРЫШ!\n\n" + name + "\n" + description + "\n\nПобедителей: " + str(winners) + "\nЗавершится: " + end_time.strftime('%d.%m.%Y в %H:%M') + "\n\n" + progress + "\n" + format_time_left(end_time.isoformat()) + sub_text + "\n\nНажмите кнопку!",
+            reply_markup=markup)
         db.update_message_id(giveaway_id, message.message_id)
-        update.message.reply_text("Розыгрыш создан! ID: " + str(giveaway_id))
+        update.message.reply_text("Розыгрыш создан! ID: " + str(giveaway_id) + ("\n\nПроверка подписки: ВКЛ" if require_sub == 1 else ""))
     except Exception as e:
         update.message.reply_text("Ошибка: " + str(e))
 
-def list_giveaways(update, context):
-    if not is_admin(update.effective_user.id):
-        update.message.reply_text("Нет прав")
+def list_giveaways_cmd(update, context, message=None):
+    user_id = update.effective_user.id if update.effective_user else message.from_user.id
+
+    if not is_admin(user_id):
+        if message:
+            message.edit_text("Нет прав")
+        else:
+            update.message.reply_text("Нет прав")
         return
+
     giveaways = db.get_active_giveaways()
     if not giveaways:
-        update.message.reply_text("Нет розыгрышей")
+        keyboard = [[InlineKeyboardButton("Назад", callback_data="cmd_admin")]]
+        markup = InlineKeyboardMarkup(keyboard)
+        if message:
+            message.edit_text("Нет розыгрышей", reply_markup=markup)
+        else:
+            update.message.reply_text("Нет розыгрышей", reply_markup=markup)
         return
+
     text = "Активные розыгрыши:\n\n"
     for g in giveaways:
-        gid, name, winners, end_date = g
+        gid, name, winners, end_date, require_sub = g
         participants = db.get_participants_count(gid)
-        text += "ID: " + str(gid) + "\n" + name + "\nУчастников: " + str(participants) + "\n------\n"
-    update.message.reply_text(text)
+        time_left = format_time_left(end_date)
+        progress = create_progress_bar(end_date)
+        sub_mark = " " if require_sub == 1 else ""
+        text += "ID: " + str(gid) + " " + sub_mark + "\n" + name + "\nУчастников: " + str(participants) + "\n" + progress + " " + time_left + "\n------\n"
+
+    keyboard = [[InlineKeyboardButton("Назад", callback_data="cmd_admin")]]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if message:
+        message.edit_text(text, reply_markup=markup)
+    else:
+        update.message.reply_text(text, reply_markup=markup)
 
 def end_giveaway(update, context):
     if not is_admin(update.effective_user.id):
@@ -504,32 +709,60 @@ def end_giveaway(update, context):
         return
     try:
         giveaway_id = int(context.args[0])
+        finish_giveaway(context.bot, giveaway_id, update.message)
+    except Exception as e:
+        update.message.reply_text("Ошибка: " + str(e))
+
+def finish_giveaway(bot, giveaway_id, message=None):
+    try:
         participants = db.get_participants(giveaway_id)
         if not participants:
-            update.message.reply_text("Нет участников")
+            if message:
+                message.reply_text("Нет участников")
             return
+
         giveaway_info = db.get_giveaway_info(giveaway_id)
         if not giveaway_info:
-            update.message.reply_text("Не найден")
+            if message:
+                message.reply_text("Не найден")
             return
+
         winner_count = min(giveaway_info[3], len(participants))
         winners = random.sample(participants, winner_count)
+
         winners_text = "ПОБЕДИТЕЛИ!\n\n"
         for i, winner_id in enumerate(winners, 1):
             try:
-                user = context.bot.get_chat(winner_id)
+                user = bot.get_chat(winner_id)
                 username = "@" + user.username if user.username else user.first_name
                 winners_text += str(i) + ". " + username + "\n"
             except:
                 winners_text += str(i) + ". ID: " + str(winner_id) + "\n"
+
         db.end_giveaway(giveaway_id)
+
         try:
-            context.bot.send_message(chat_id=CHANNEL_ID, text=winners_text)
+            bot.send_message(chat_id=CHANNEL_ID, text=winners_text)
         except:
             pass
-        update.message.reply_text("Завершен!\n\n" + winners_text)
+
+        if message:
+            message.reply_text("Завершен!\n\n" + winners_text)
+
+        logger.info("Giveaway " + str(giveaway_id) + " finished automatically")
     except Exception as e:
-        update.message.reply_text("Ошибка: " + str(e))
+        logger.error("Error finishing giveaway " + str(giveaway_id) + ": " + str(e))
+
+def auto_finish_thread(bot):
+    while True:
+        try:
+            giveaways_to_finish = db.get_giveaways_to_finish()
+            for gid in giveaways_to_finish:
+                finish_giveaway(bot, gid)
+            time.sleep(60)
+        except Exception as e:
+            logger.error("Auto-finish error: " + str(e))
+            time.sleep(60)
 
 def stats(update, context):
     if not is_admin(update.effective_user.id):
@@ -545,11 +778,14 @@ def stats(update, context):
             update.message.reply_text("Не найден")
             return
         participants_count = db.get_participants_count(giveaway_id)
-        _, name, description, winners, start_date, end_date, is_active, _, _ = giveaway_info
+        _, name, description, winners, start_date, end_date, is_active, _, _, _, require_sub = giveaway_info
         start = datetime.fromisoformat(start_date)
         end = datetime.fromisoformat(end_date)
         status = "Активен" if is_active == 1 else "Завершен"
-        text = "Статистика #" + str(giveaway_id) + "\n\n" + name + "\n" + description + "\nПобедителей: " + str(winners) + "\nУчастников: " + str(participants_count) + "\nСтатус: " + status + "\n\n" + start.strftime('%d.%m %H:%M') + " - " + end.strftime('%d.%m %H:%M')
+        time_left = format_time_left(end_date)
+        progress = create_progress_bar(end_date)
+        sub_text = "ВКЛ" if require_sub == 1 else "ВЫКЛ"
+        text = "Статистика #" + str(giveaway_id) + "\n\n" + name + "\n" + description + "\nПобедителей: " + str(winners) + "\nУчастников: " + str(participants_count) + "\nСтатус: " + status + "\nПроверка подписки: " + sub_text + "\n\n" + progress + " " + time_left + "\n\n" + start.strftime('%d.%m %H:%M') + " - " + end.strftime('%d.%m %H:%M')
         update.message.reply_text(text)
     except Exception as e:
         update.message.reply_text("Ошибка: " + str(e))
@@ -723,15 +959,57 @@ def verify_info(update, context):
 def button_handler(update, context):
     query = update.callback_query
     user_id = query.from_user.id
+
     try:
         query.answer()
     except:
         pass
-    if query.data.startswith('join_'):
+
+    if query.data == "cmd_start":
+        user = query.from_user
+        keyboard = [
+            [InlineKeyboardButton("Пройти проверку", callback_data="cmd_verify")],
+            [InlineKeyboardButton("Мои рефералы", callback_data="cmd_my_referrals")],
+            [InlineKeyboardButton("Топ рефереров", callback_data="cmd_top")],
+            [InlineKeyboardButton("Помощь", callback_data="cmd_help")]
+        ]
+        if is_admin(user_id):
+            keyboard.append([InlineKeyboardButton("Админ-панель", callback_data="cmd_admin")])
+        markup = InlineKeyboardMarkup(keyboard)
+        query.message.edit_text("Привет, " + user.first_name + "!\n\nБот для розыгрышей\n\nВыберите действие:", reply_markup=markup)
+
+    elif query.data == "cmd_verify":
+        if db.is_verified(user_id):
+            keyboard = [[InlineKeyboardButton("Главное меню", callback_data="cmd_start")]]
+            markup = InlineKeyboardMarkup(keyboard)
+            query.message.edit_text("Вы уже верифицированы!", reply_markup=markup)
+        else:
+            keyboard = [[InlineKeyboardButton("Назад", callback_data="cmd_start")]]
+            markup = InlineKeyboardMarkup(keyboard)
+            query.message.edit_text("Для прохождения проверки напишите команду:\n/verify", reply_markup=markup)
+
+    elif query.data == "cmd_my_referrals":
+        my_referrals(update, context, query.message)
+
+    elif query.data == "cmd_top":
+        top_referrers(update, context, query.message)
+
+    elif query.data == "cmd_help":
+        help_cmd(update, context, query.message)
+
+    elif query.data == "cmd_admin":
+        admin_panel(update, context, query.message)
+
+    elif query.data == "admin_list":
+        list_giveaways_cmd(update, context, query.message)
+
+    elif query.data.startswith('join_'):
         giveaway_id = int(query.data.split('_')[1])
+
         if db.is_banned(user_id):
             query.answer("Вы забанены", show_alert=True)
             return
+
         if not db.is_verified(user_id):
             try:
                 context.bot.send_message(chat_id=user_id, text="Необходима верификация!\n\nНапишите /verify")
@@ -739,49 +1017,73 @@ def button_handler(update, context):
             except:
                 query.answer("Напишите боту /verify", show_alert=True)
             return
+
         giveaway_info = db.get_giveaway_info(giveaway_id)
         if not giveaway_info or giveaway_info[6] == 0:
             query.answer("Розыгрыш завершен", show_alert=True)
             return
+
+        require_sub = giveaway_info[10]
+        if require_sub == 1:
+            if not check_subscription(context.bot, user_id, CHANNEL_ID):
+                query.answer("Подпишитесь на канал: " + CHANNEL_ID, show_alert=True)
+                return
+
         end_time = datetime.fromisoformat(giveaway_info[5])
         if datetime.now() > end_time:
             query.answer("Время истекло", show_alert=True)
             return
+
         multi_accounts = db.check_multiple_accounts(user_id)
         if multi_accounts and len(multi_accounts) >= 2:
             query.answer("Обнаружены мультиаккаунты!", show_alert=True)
+
         referrer_id = context.user_data.get('referrer') if context.user_data.get('giveaway') == giveaway_id else None
+
         if db.add_participant(giveaway_id, user_id, referred_by=referrer_id):
             participants_count = db.get_participants_count(giveaway_id)
+
             if 'referrer' in context.user_data:
                 del context.user_data['referrer']
             if 'giveaway' in context.user_data:
                 del context.user_data['giveaway']
+
             try:
                 context.bot.send_message(chat_id=user_id, text="Вы участвуете!\n\n" + giveaway_info[1] + "\nПобедителей: " + str(giveaway_info[3]) + "\nУчастников: " + str(participants_count) + "\n\nИспользуйте /my_referrals")
             except:
                 pass
+
             query.answer("Вы участвуете! Всего: " + str(participants_count), show_alert=True)
         else:
             query.answer("Вы уже участвуете", show_alert=True)
 
 def main():
     print("="*70)
-    print("БОТ ДЛЯ РОЗЫГРЫШЕЙ")
+    print("БОТ ДЛЯ РОЗЫГРЫШЕЙ (PREMIUM VERSION)")
     print("="*70)
     print("Токен: " + BOT_TOKEN[:15] + "...")
     print("Админы: " + str(ADMIN_IDS))
     print("Канал: " + CHANNEL_ID)
     print("="*70)
+    print("Улучшения:")
+    print("1. Проверка подписки на канал")
+    print("2. Inline-кнопки меню")
+    print("3. Автозавершение розыгрышей")
+    print("4. Прогресс-бар и таймер")
+    print("5. Топ рефереров")
+    print("="*70)
+
     try:
         updater = Updater(BOT_TOKEN, use_context=True)
         dp = updater.dispatcher
+
         dp.add_handler(CommandHandler("start", start))
         dp.add_handler(CommandHandler("verify", verify))
-        dp.add_handler(CommandHandler("my_referrals", my_referrals))
-        dp.add_handler(CommandHandler("help", help_cmd))
+        dp.add_handler(CommandHandler("my_referrals", lambda u, c: my_referrals(u, c)))
+        dp.add_handler(CommandHandler("top", lambda u, c: top_referrers(u, c)))
+        dp.add_handler(CommandHandler("help", lambda u, c: help_cmd(u, c)))
         dp.add_handler(CommandHandler("new", new_giveaway))
-        dp.add_handler(CommandHandler("list", list_giveaways))
+        dp.add_handler(CommandHandler("list", lambda u, c: list_giveaways_cmd(u, c)))
         dp.add_handler(CommandHandler("end", end_giveaway))
         dp.add_handler(CommandHandler("stats", stats))
         dp.add_handler(CommandHandler("participants", participants_cmd))
@@ -793,11 +1095,18 @@ def main():
         dp.add_handler(CommandHandler("verify_info", verify_info))
         dp.add_handler(CallbackQueryHandler(button_handler))
         dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
+
+        auto_finish = threading.Thread(target=auto_finish_thread, args=(updater.bot,), daemon=True)
+        auto_finish.start()
+
         updater.start_polling()
         print("="*70)
         print("БОТ ЗАПУЩЕН!")
+        print("Автозавершение: АКТИВНО")
         print("="*70)
+
         updater.idle()
+
     except Exception as e:
         logger.error("Ошибка: " + str(e))
         print("Ошибка: " + str(e))
