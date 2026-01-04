@@ -21,7 +21,7 @@ from telegram.ext import Filters
 from telegram.parsemode import ParseMode
 
 # ================== НАСТРОЙКИ ==================
-BOT_TOKEN = os.getenv('8458068573:AAHaKHcWQZOOmTu-z2wu-7kbX8MdhonkS_M', '8458068573:AAHaKHcWQZOOmTu-z2wu-7kbX8MdhonkS_M')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8458068573:AAHaKHcWQZOOmTu-z2wu-7kbX8MdhonkS_M')
 ADMIN_IDS = [5207853162, 5406117718]  # Ваш Telegram ID
 CHANNEL_ID = "@sportgagarinmolodezh"  # ID вашего КАНАЛА
 
@@ -324,14 +324,34 @@ class Database:
                       (message_id, giveaway_id))
         self.conn.commit()
     
-    def add_participant(self, giveaway_id, user_id):
+    def add_participant(self, giveaway_id, user_id, referred_by=None):
         cursor = self.conn.cursor()
         try:
             cursor.execute('''
-                INSERT INTO participants (giveaway_id, user_id, join_date) 
-                VALUES (?, ?, ?)
-            ''', (giveaway_id, user_id, datetime.now().isoformat()))
+                INSERT INTO participants (giveaway_id, user_id, join_date, referred_by) 
+                VALUES (?, ?, ?, ?)
+            ''', (giveaway_id, user_id, datetime.now().isoformat(), referred_by))
             self.conn.commit()
+
+            # Если есть реферер, добавляем запись и бонусы
+            if referred_by:
+                try:
+                    cursor.execute('''
+                        INSERT INTO referrals (referrer_id, referred_id, giveaway_id, referral_date)
+                        VALUES (?, ?, ?, ?)
+                    ''', (referred_by, user_id, giveaway_id, datetime.now().isoformat()))
+
+                    # Добавляем бонусную заявку рефереру
+                    cursor.execute('''
+                        UPDATE participants 
+                        SET bonus_entries = bonus_entries + 1
+                        WHERE giveaway_id = ? AND user_id = ?
+                    ''', (giveaway_id, referred_by))
+
+                    self.conn.commit()
+                except sqlite3.IntegrityError:
+                    pass  # Реферал уже был добавлен
+
             return True
         except sqlite3.IntegrityError:
             cursor.execute('''
@@ -340,6 +360,58 @@ class Database:
             ''', (datetime.now().isoformat(), giveaway_id, user_id))
             self.conn.commit()
             return True
+
+    def get_referral_count(self, user_id, giveaway_id):
+        """Получить количество приглашенных пользователей"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT COUNT(*) FROM referrals 
+            WHERE referrer_id = ? AND giveaway_id = ?
+        ''', (user_id, giveaway_id))
+        return cursor.fetchone()[0]
+
+    def get_referrals_list(self, user_id, giveaway_id):
+        """Получить список приглашенных пользователей"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT r.referred_id, u.username, u.first_name, r.referral_date
+            FROM referrals r
+            LEFT JOIN users u ON r.referred_id = u.user_id
+            WHERE r.referrer_id = ? AND r.giveaway_id = ?
+            ORDER BY r.referral_date DESC
+        ''', (user_id, giveaway_id))
+        return cursor.fetchall()
+
+    def get_referrer(self, user_id, giveaway_id):
+        """Узнать кто пригласил пользователя"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT p.referred_by, u.username, u.first_name
+            FROM participants p
+            LEFT JOIN users u ON p.referred_by = u.user_id
+            WHERE p.giveaway_id = ? AND p.user_id = ? AND p.referred_by IS NOT NULL
+        ''', (giveaway_id, user_id))
+        return cursor.fetchone()
+
+    def get_bonus_entries(self, user_id, giveaway_id):
+        """Получить количество бонусных заявок"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT bonus_entries FROM participants 
+            WHERE giveaway_id = ? AND user_id = ?
+        ''', (giveaway_id, user_id))
+        result = cursor.fetchone()
+        return result[0] if result else 0
+
+    def get_participants_with_bonus(self, giveaway_id):
+        """Получить всех участников с учетом бонусных заявок для розыгрыша"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT user_id, (1 + bonus_entries) as total_entries
+            FROM participants 
+            WHERE giveaway_id = ? AND is_valid = 1
+        ''', (giveaway_id,))
+        return cursor.fetchall()
     
     def remove_participant(self, giveaway_id, user_id):
         cursor = self.conn.cursor()
@@ -602,59 +674,93 @@ def handle_text(update: Update, context: CallbackContext):
                 left = 3 - captcha['attempts']
                 update.message.reply_text(f"❌ Неверно. Осталось попыток: {left}")
 
-# ================== КОМАНДЫ ДЛЯ АДМИНОВ ==================
 
-# ================== ОБНОВЛЕНИЕ СООБЩЕНИЯ С УЧАСТНИКАМИ ==================
-def update_giveaway_message(context, giveaway_id):
-    """Обновляет сообщение розыгрыша с актуальным количеством участников"""
-    try:
-        giveaway_info = db.get_giveaway_info(giveaway_id)
-        if not giveaway_info:
-            return
+def my_referrals(update: Update, context: CallbackContext):
+    """Показать статистику по рефералам"""
+    user_id = update.effective_user.id
 
-        _, name, description, winners, start_date, end_date, is_active, message_id, channel_id = giveaway_info
+    if db.is_banned(user_id):
+        update.message.reply_text("🚫 Вы забанены.")
+        return
 
-        if not message_id or not channel_id:
-            return
+    if not db.is_verified(user_id):
+        update.message.reply_text("❌ Сначала пройдите проверку: /verify")
+        return
 
-        participants_count = db.get_participants_count(giveaway_id)
-        end_time = datetime.fromisoformat(end_date)
+    active_giveaways = db.get_active_giveaways()
 
-        time_left = end_time - datetime.now()
-        days = time_left.days
-        hours_left = time_left.seconds // 3600
-        minutes_left = (time_left.seconds % 3600) // 60
+    if not active_giveaways:
+        update.message.reply_text("❌ Нет активных розыгрышей")
+        return
 
-        time_text = ""
-        if days > 0:
-            time_text = f"{days} дней {hours_left} часов"
-        elif hours_left > 0:
-            time_text = f"{hours_left} часов {minutes_left} минут"
-        else:
-            time_text = f"{minutes_left} минут"
+    text = "🎁 *Ваши реферальные ссылки:*\n\n"
 
-        keyboard = [[InlineKeyboardButton("🎟 Участвовать", callback_data=f"join_{giveaway_id}")]]
-        markup = InlineKeyboardMarkup(keyboard)
+    for g in active_giveaways:
+        gid, name, winners, end_date = g
+        referral_count = db.get_referral_count(user_id, gid)
+        bonus_entries = db.get_bonus_entries(user_id, gid)
 
-        context.bot.edit_message_text(
-            chat_id=channel_id,
-            message_id=message_id,
-            text=(
-                f"🎉 *НОВЫЙ РОЗЫГРЫШ!*\n\n"
-                f"🏆 *{name}*\n"
-                f"📝 {description}\n\n"
-                f"👑 *Победителей:* {winners}\n"
-                f"👥 *Участников:* {participants_count}\n"
-                f"⏰ *Завершится через:* {time_text}\n"
-                f"📅 *Дата окончания:* {end_time.strftime('%d.%m.%Y в %H:%M')}\n\n"
-                f"👇 *Нажмите кнопку ниже для участия*"
-            ),
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=markup
+        # Генерируем реферальную ссылку
+        bot_username = context.bot.get_me().username
+        ref_link = f"https://t.me/{bot_username}?start=ref_{gid}_{user_id}"
+
+        text += (
+            f"🏆 *{name}*\n"
+            f"🔗 Ваша ссылка:\n`{ref_link}`\n"
+            f"👥 Приглашено: {referral_count}\n"
+            f"🎟 Бонусных заявок: {bonus_entries}\n"
+            f"📈 Шансов на победу: {1 + bonus_entries}x\n"
+            f"──────\n"
         )
-    except Exception as e:
-        logger.error(f"Ошибка обновления сообщения: {e}")
 
+    text += (
+        "\n💡 *Как это работает:*\n"
+        "• Отправьте ссылку друзьям\n"
+        "• За каждого друга вы получаете +1 заявку\n"
+        "• Больше заявок = выше шанс победы!\n\n"
+        "📊 Подробная статистика: /refstats"
+    )
+
+    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+def ref_stats(update: Update, context: CallbackContext):
+    """Детальная статистика по рефералам"""
+    user_id = update.effective_user.id
+
+    if not context.args:
+        update.message.reply_text("Использование: /refstats <id_розыгрыша>\n\nУзнать ID: /list")
+        return
+
+    try:
+        giveaway_id = int(context.args[0])
+    except:
+        update.message.reply_text("❌ ID должен быть числом")
+        return
+
+    referrals = db.get_referrals_list(user_id, giveaway_id)
+
+    if not referrals:
+        update.message.reply_text("У вас пока нет приглашенных пользователей в этом розыгрыше.")
+        return
+
+    giveaway_info = db.get_giveaway_info(giveaway_id)
+    name = giveaway_info[1] if giveaway_info else f"#{giveaway_id}"
+
+    text = f"📊 *Статистика приглашений*\n🏆 Розыгрыш: {name}\n\n"
+    text += f"👥 *Ваши рефералы ({len(referrals)}):*\n\n"
+
+    for i, (ref_id, username, first_name, ref_date) in enumerate(referrals, 1):
+        date_str = datetime.fromisoformat(ref_date).strftime('%d.%m.%Y %H:%M') if ref_date else "неизвестно"
+        user_display = f"{first_name} (@{username})" if username else first_name
+        text += f"{i}. {user_display}\n   📅 {date_str}\n"
+
+    bonus = db.get_bonus_entries(user_id, giveaway_id)
+    text += f"\n🎟 *Всего бонусных заявок:* {bonus}\n"
+    text += f"📈 *Ваш множитель шанса:* {1 + bonus}x"
+
+    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+# ================== КОМАНДЫ ДЛЯ АДМИНОВ ==================
 def new_giveaway(update: Update, context: CallbackContext):
     if not is_admin(update.effective_user.id):
         update.message.reply_text("❌ Нет прав")
@@ -700,7 +806,6 @@ def new_giveaway(update: Update, context: CallbackContext):
                 f"🏆 *{name}*\n"
                 f"📝 {description}\n\n"
                 f"👑 *Победителей:* {winners}\n"
-                f"👥 *Участников:* 0\n"
                 f"⏰ *Завершится через:* {time_text}\n"
                 f"📅 *Дата окончания:* {end_time.strftime('%d.%m.%Y в %H:%M')}\n\n"
                 f"👇 *Нажмите кнопку ниже для участия*"
